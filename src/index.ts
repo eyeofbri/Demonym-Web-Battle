@@ -24,11 +24,12 @@ interface CreatureState {
 }
 
 interface BattleState {
-	version: 2;
+	version: 3;
 	players: [CreatureState, CreatureState];
 	ready: [boolean, boolean];
 	started: boolean;
 	turn: PlayerNumber | null;
+	initiativeWinner: PlayerNumber | null;
 	winner: PlayerNumber | null;
 	log: string[];
 }
@@ -78,13 +79,20 @@ function createCreature(player: PlayerNumber): CreatureState {
 	};
 }
 
+function pickStartingPlayer(): PlayerNumber {
+	const byte = new Uint8Array(1);
+	crypto.getRandomValues(byte);
+	return byte[0] % 2 === 0 ? 1 : 2;
+}
+
 function createInitialState(): BattleState {
 	return {
-		version: 2,
+		version: 3,
 		players: [createCreature(1), createCreature(2)],
 		ready: [false, false],
 		started: false,
 		turn: null,
+		initiativeWinner: null,
 		winner: null,
 		log: ['Battle room created.'],
 	};
@@ -94,8 +102,8 @@ export class BattleRoom extends DurableObject<Env> {
 	private async getState(): Promise<BattleState> {
 		const storedState = await this.ctx.storage.get<BattleState | { version?: number }>('state');
 
-		// Old v0.1 rooms used a different state shape. Reset those rooms cleanly.
-		if (!storedState || storedState.version !== 2) {
+		// Older rooms used a different state shape. Reset those rooms cleanly.
+		if (!storedState || storedState.version !== 3) {
 			const state = createInitialState();
 			await this.ctx.storage.put('state', state);
 			return state;
@@ -175,9 +183,14 @@ export class BattleRoom extends DurableObject<Env> {
 		this.addLog(state, `Player ${player} is ready.`);
 
 		if (state.ready[0] && state.ready[1] && this.bothPlayersConnected()) {
+			const startingPlayer = pickStartingPlayer();
+
 			state.started = true;
-			state.turn = 1;
-			this.addLog(state, 'Both players ready. Player 1 goes first.');
+			state.turn = startingPlayer;
+			state.initiativeWinner = startingPlayer;
+
+			this.addLog(state, 'Both players ready. Signal Toss...');
+			this.addLog(state, `Player ${startingPlayer} wins the Signal Toss and moves first.`);
 		}
 
 		await this.saveAndBroadcast(state);
@@ -349,6 +362,7 @@ export class BattleRoom extends DurableObject<Env> {
 			state.ready[attachment.player - 1] = false;
 			state.started = false;
 			state.turn = null;
+			state.initiativeWinner = null;
 			this.addLog(state, `Player ${attachment.player} disconnected. Battle paused.`);
 			await this.ctx.storage.put('state', state);
 		}

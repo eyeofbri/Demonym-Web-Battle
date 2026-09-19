@@ -107,6 +107,13 @@
 				opacity: 0.75;
 			}
 
+			#signal-toss {
+				min-height: 24px;
+				margin: 16px 0 6px;
+				letter-spacing: 0.04em;
+				opacity: 0.8;
+			}
+
 			#status {
 				min-height: 24px;
 				margin: 16px 0;
@@ -211,6 +218,7 @@
 					</div>
 				</div>
 
+				<div id="signal-toss"></div>
 				<div id="status">Connecting...</div>
 				<button id="ready" disabled>READY</button>
 				<div id="moves"></div>
@@ -232,6 +240,7 @@
 			const roomInput = document.querySelector('#room-code');
 			const currentRoom = document.querySelector('#current-room');
 			const playerLabel = document.querySelector('#player-label');
+			const signalToss = document.querySelector('#signal-toss');
 			const status = document.querySelector('#status');
 			const battleLog = document.querySelector('#battle-log');
 			const player1Card = document.querySelector('#player-1');
@@ -393,6 +402,12 @@
 
 				const bothConnected = connectedPlayers.includes(1) && connectedPlayers.includes(2);
 				const playerReady = state.ready[playerNumber - 1];
+
+				if (state.started && state.initiativeWinner) {
+					signalToss.textContent = `SIGNAL TOSS: Player ${state.initiativeWinner} moves first.`;
+				} else {
+					signalToss.textContent = '';
+				}
 
 				readyButton.disabled = !bothConnected || playerReady || state.winner !== null;
 				readyButton.textContent = playerReady ? 'READY' : 'READY';
