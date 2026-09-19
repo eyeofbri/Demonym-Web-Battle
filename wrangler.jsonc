@@ -1,0 +1,33 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "demonym-web-battle",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-09-18",
+
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "BATTLE_ROOM",
+				"class_name": "BattleRoom",
+			},
+		],
+	},
+
+	"exports": {
+		"BattleRoom": {
+			"type": "durable-object",
+			"storage": "sqlite",
+		},
+	},
+
+	"assets": {
+		"directory": "./public",
+		"run_worker_first": ["/api/*"],
+	},
+
+	"observability": {
+		"enabled": true,
+	},
+
+	"upload_source_maps": true,
+}

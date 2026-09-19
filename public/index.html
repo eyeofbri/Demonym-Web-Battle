@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+		<title>Demonym Web Battle</title>
+
+		<style>
+			* {
+				box-sizing: border-box;
+			}
+
+			body {
+				margin: 0;
+				min-height: 100vh;
+				background: #111;
+				color: #fff;
+				font-family: monospace;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+			}
+
+			main {
+				width: min(700px, calc(100% - 32px));
+			}
+
+			h1 {
+				margin-top: 0;
+			}
+
+			button,
+			input {
+				font: inherit;
+				padding: 10px 14px;
+			}
+
+			button {
+				cursor: pointer;
+			}
+
+			.lobby {
+				display: grid;
+				gap: 16px;
+			}
+
+			.join {
+				display: flex;
+				gap: 8px;
+			}
+
+			.join input {
+				flex: 1;
+				text-transform: uppercase;
+			}
+
+			#battle {
+				display: none;
+			}
+
+			.room {
+				margin-bottom: 24px;
+				opacity: 0.7;
+			}
+
+			.creatures {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 16px;
+				margin: 24px 0;
+			}
+
+			.creature {
+				border: 1px solid #666;
+				padding: 18px;
+			}
+
+			.creature.you {
+				border-color: #fff;
+			}
+
+			.hp {
+				font-size: 1.2rem;
+				margin-top: 10px;
+			}
+
+			#status {
+				min-height: 24px;
+				margin: 16px 0;
+			}
+
+			#attack {
+				width: 100%;
+				font-weight: bold;
+			}
+		</style>
+	</head>
+
+	<body>
+		<main>
+			<section id="lobby">
+				<h1>DEMONYM WEB BATTLE</h1>
+
+				<div class="lobby">
+					<button id="create">Create Battle</button>
+
+					<div class="join">
+						<input id="room-code" type="text" maxlength="6" placeholder="Battle Code" autocomplete="off" />
+
+						<button id="join">Join Battle</button>
+					</div>
+				</div>
+			</section>
+
+			<section id="battle">
+				<h1>DEMONYM WEB BATTLE</h1>
+
+				<div class="room">
+					Battle Code:
+					<strong id="current-room"></strong>
+				</div>
+
+				<div id="player-label">Connecting...</div>
+
+				<div class="creatures">
+					<div id="player-1" class="creature">
+						<strong>PLAYER 1</strong>
+
+						<div>Test Creature</div>
+
+						<div class="hp">
+							HP:
+							<span id="hp-1">100</span>/100
+						</div>
+					</div>
+
+					<div id="player-2" class="creature">
+						<strong>PLAYER 2</strong>
+
+						<div>Test Creature</div>
+
+						<div class="hp">
+							HP:
+							<span id="hp-2">100</span>/100
+						</div>
+					</div>
+				</div>
+
+				<div id="status">Connecting...</div>
+
+				<button id="attack" disabled>ATTACK</button>
+			</section>
+		</main>
+
+		<script>
+			const lobby = document.querySelector('#lobby');
+			const battle = document.querySelector('#battle');
+
+			const createButton = document.querySelector('#create');
+			const joinButton = document.querySelector('#join');
+			const attackButton = document.querySelector('#attack');
+
+			const roomInput = document.querySelector('#room-code');
+			const currentRoom = document.querySelector('#current-room');
+
+			const playerLabel = document.querySelector('#player-label');
+			const status = document.querySelector('#status');
+
+			const hp1 = document.querySelector('#hp-1');
+			const hp2 = document.querySelector('#hp-2');
+
+			const player1Card = document.querySelector('#player-1');
+			const player2Card = document.querySelector('#player-2');
+
+			let socket = null;
+			let playerNumber = null;
+			let connectedPlayers = 0;
+			let state = null;
+
+			function showBattle(code) {
+				lobby.style.display = 'none';
+				battle.style.display = 'block';
+
+				currentRoom.textContent = code;
+			}
+
+			function connectToRoom(code) {
+				code = code.trim().toUpperCase();
+
+				if (!/^[A-Z2-9]{6}$/.test(code)) {
+					alert('Enter a valid 6-character battle code.');
+					return;
+				}
+
+				showBattle(code);
+
+				const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+
+				socket = new WebSocket(`${protocol}://${location.host}/api/rooms/${code}/ws`);
+
+				socket.addEventListener('open', () => {
+					status.textContent = 'Connected.';
+				});
+
+				socket.addEventListener('message', (event) => {
+					const message = JSON.parse(event.data);
+
+					if (message.type === 'welcome') {
+						playerNumber = message.player;
+						state = message.state;
+
+						playerLabel.textContent = `You are Player ${playerNumber}`;
+
+						player1Card.classList.toggle('you', playerNumber === 1);
+
+						player2Card.classList.toggle('you', playerNumber === 2);
+
+						render();
+					}
+
+					if (message.type === 'state') {
+						state = message.state;
+						connectedPlayers = message.connected;
+
+						render();
+					}
+
+					if (message.type === 'error') {
+						status.textContent = message.message;
+					}
+				});
+
+				socket.addEventListener('close', () => {
+					attackButton.disabled = true;
+					status.textContent = 'Disconnected.';
+				});
+
+				socket.addEventListener('error', () => {
+					attackButton.disabled = true;
+					status.textContent = 'Connection error.';
+				});
+			}
+
+			function render() {
+				if (!state) {
+					return;
+				}
+
+				hp1.textContent = state.hp[0];
+				hp2.textContent = state.hp[1];
+
+				if (state.winner) {
+					status.textContent = `Player ${state.winner} wins.`;
+
+					attackButton.disabled = true;
+
+					return;
+				}
+
+				if (connectedPlayers < 2) {
+					status.textContent = 'Waiting for opponent...';
+
+					attackButton.disabled = true;
+
+					return;
+				}
+
+				status.textContent = 'Opponent connected.';
+
+				attackButton.disabled = false;
+			}
+
+			createButton.addEventListener('click', async () => {
+				createButton.disabled = true;
+
+				try {
+					const response = await fetch('/api/rooms', {
+						method: 'POST',
+					});
+
+					const data = await response.json();
+
+					connectToRoom(data.code);
+				} finally {
+					createButton.disabled = false;
+				}
+			});
+
+			joinButton.addEventListener('click', () => {
+				connectToRoom(roomInput.value);
+			});
+
+			roomInput.addEventListener('keydown', (event) => {
+				if (event.key === 'Enter') {
+					connectToRoom(roomInput.value);
+				}
+			});
+
+			attackButton.addEventListener('click', () => {
+				if (!socket) {
+					return;
+				}
+
+				socket.send(
+					JSON.stringify({
+						type: 'attack',
+					}),
+				);
+			});
+		</script>
+	</body>
+</html>
