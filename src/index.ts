@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 
 type PlayerNumber = 1 | 2;
+type Lineage = 'Husk' | 'Mire' | 'Wisp' | 'Fang' | 'Choir' | 'Machine' | 'Cinder' | 'Veil';
 type Pressure = 'Neutral' | 'Force' | 'Signal' | 'Heat' | 'Corrosion' | 'Echo';
 type MoveRole = 'attack' | 'guard' | 'heal' | 'utility';
 type StatusId = 'stagger' | 'disruption' | 'burn' | 'corrosion' | 'echo-interference' | 'evasion' | 'ward';
@@ -37,12 +38,12 @@ interface MoveDefinition {
 	accuracy: number;
 	power: number;
 	description: string;
-	signatureOf?: string;
+	signatureOf?: Lineage;
 }
 
 interface CreatureState {
 	name: string;
-	lineage: string;
+	lineage: Lineage;
 	hp: number;
 	maxHp: number;
 	energy: number;
@@ -53,7 +54,7 @@ interface CreatureState {
 }
 
 interface BattleState {
-	version: 4;
+	version: 5;
 	players: [CreatureState, CreatureState];
 	ready: [boolean, boolean];
 	started: boolean;
@@ -70,6 +71,13 @@ interface SocketAttachment {
 interface ClientMessage {
 	type?: string;
 	moveId?: string;
+	lineage?: string;
+}
+
+interface LineageDefinition {
+	id: Lineage;
+	name: string;
+	moves: MoveId[];
 }
 
 /*
@@ -241,6 +249,23 @@ const MOVE_LIBRARY: Record<MoveId, MoveDefinition> = {
 	},
 };
 
+/*
+ * v0.2.3 lineage presets. These are WEB TEST LOADOUTS built around the known
+ * Demonym move vocabulary and each lineage's signature move. They make every
+ * lineage/signature selectable for multiplayer testing without pretending the
+ * private Cardputer learned-move table has already been synced.
+ */
+const LINEAGE_LIBRARY: Record<Lineage, LineageDefinition> = {
+	Husk: { id: 'Husk', name: 'Husk', moves: ['pulse-strike', 'quiet-ward', 'rend', 'shell-brace'] },
+	Mire: { id: 'Mire', name: 'Mire', moves: ['pulse-strike', 'restore-pulse', 'signal-snare', 'bog-leech'] },
+	Wisp: { id: 'Wisp', name: 'Wisp', moves: ['pulse-strike', 'signal-snare', 'restore-pulse', 'phase-feint'] },
+	Fang: { id: 'Fang', name: 'Fang', moves: ['pulse-strike', 'rend', 'reckless-rush', 'pursuit-bite'] },
+	Choir: { id: 'Choir', name: 'Choir', moves: ['pulse-strike', 'signal-snare', 'restore-pulse', 'chorus-echo'] },
+	Machine: { id: 'Machine', name: 'Machine', moves: ['pulse-strike', 'quiet-ward', 'overcharge', 'panel-shift'] },
+	Cinder: { id: 'Cinder', name: 'Cinder', moves: ['pulse-strike', 'overcharge', 'reckless-rush', 'ember-spire'] },
+	Veil: { id: 'Veil', name: 'Veil', moves: ['pulse-strike', 'signal-snare', 'quiet-ward', 'veil-snare'] },
+};
+
 const STARTING_HP = 100;
 const STARTING_ENERGY = 7;
 const MAX_ENERGY = 10;
@@ -252,31 +277,18 @@ const EVASION_BONUS = 20;
 const BURN_DAMAGE = 4;
 const CORROSION_DAMAGE_MULTIPLIER = 1.2;
 
-function createCreature(player: PlayerNumber): CreatureState {
-	// These are mixed TEST LOADOUTS used to exercise the web resolver. They are
-	// not intended to replace the Cardputer's final learned/active move tables.
-	if (player === 1) {
-		return {
-			name: 'Test Husk',
-			lineage: 'Husk',
-			hp: STARTING_HP,
-			maxHp: STARTING_HP,
-			energy: STARTING_ENERGY,
-			maxEnergy: MAX_ENERGY,
-			moves: ['pulse-strike', 'quiet-ward', 'rend', 'shell-brace'],
-			statuses: [],
-			lastMoveId: null,
-		};
-	}
+function createCreature(player: PlayerNumber, lineage?: Lineage): CreatureState {
+	const selectedLineage: Lineage = lineage ?? (player === 1 ? 'Husk' : 'Wisp');
+	const preset = LINEAGE_LIBRARY[selectedLineage];
 
 	return {
-		name: 'Test Wisp',
-		lineage: 'Wisp',
+		name: `${preset.name} Demonym`,
+		lineage: selectedLineage,
 		hp: STARTING_HP,
 		maxHp: STARTING_HP,
 		energy: STARTING_ENERGY,
 		maxEnergy: MAX_ENERGY,
-		moves: ['pulse-strike', 'signal-snare', 'restore-pulse', 'phase-feint'],
+		moves: [...preset.moves],
 		statuses: [],
 		lastMoveId: null,
 	};
@@ -296,7 +308,7 @@ function randomPercent(): number {
 
 function createInitialState(): BattleState {
 	return {
-		version: 4,
+		version: 5,
 		players: [createCreature(1), createCreature(2)],
 		ready: [false, false],
 		started: false,
@@ -387,7 +399,7 @@ export class BattleRoom extends DurableObject<Env> {
 	private async getState(): Promise<BattleState> {
 		const storedState = await this.ctx.storage.get<BattleState | { version?: number }>('state');
 
-		if (!storedState || storedState.version !== 4) {
+		if (!storedState || storedState.version !== 5) {
 			const state = createInitialState();
 			await this.ctx.storage.put('state', state);
 			return state;
@@ -435,6 +447,7 @@ export class BattleRoom extends DurableObject<Env> {
 			state,
 			connectedPlayers: this.getConnectedPlayers(),
 			moveLibrary: MOVE_LIBRARY,
+			lineageLibrary: LINEAGE_LIBRARY,
 		});
 
 		for (const socket of this.ctx.getWebSockets()) socket.send(message);
@@ -462,6 +475,32 @@ export class BattleRoom extends DurableObject<Env> {
 			this.addLog(state, `Player ${startingPlayer} wins the Signal Toss and moves first.`);
 		}
 
+		await this.saveAndBroadcast(state);
+	}
+
+	private async handleLineageSelect(socket: WebSocket, player: PlayerNumber, rawLineage?: string) {
+		const state = await this.getState();
+
+		if (state.winner !== null) {
+			this.send(socket, { type: 'error', message: 'This battle is already over.' });
+			return;
+		}
+
+		if (state.started || state.ready[player - 1]) {
+			this.send(socket, { type: 'error', message: 'Lineage is locked once you are ready.' });
+			return;
+		}
+
+		if (!rawLineage || !(rawLineage in LINEAGE_LIBRARY)) {
+			this.send(socket, { type: 'error', message: 'Unknown lineage.' });
+			return;
+		}
+
+		const lineage = rawLineage as Lineage;
+		if (state.players[player - 1].lineage === lineage) return;
+
+		state.players[player - 1] = createCreature(player, lineage);
+		this.addLog(state, `Player ${player} selected ${lineage}.`);
 		await this.saveAndBroadcast(state);
 	}
 
@@ -676,6 +715,7 @@ export class BattleRoom extends DurableObject<Env> {
 			state,
 			connectedPlayers: this.getConnectedPlayers(),
 			moveLibrary: MOVE_LIBRARY,
+			lineageLibrary: LINEAGE_LIBRARY,
 		});
 
 		await this.broadcastState(state);
@@ -693,6 +733,11 @@ export class BattleRoom extends DurableObject<Env> {
 			data = JSON.parse(message) as ClientMessage;
 		} catch {
 			this.send(socket, { type: 'error', message: 'Invalid message.' });
+			return;
+		}
+
+		if (data.type === 'select-lineage') {
+			await this.handleLineageSelect(socket, attachment.player, data.lineage);
 			return;
 		}
 

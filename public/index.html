@@ -104,6 +104,31 @@
 				margin: 16px 0;
 				font-weight: bold;
 			}
+			.lineage-picker {
+				margin: 18px 0 12px;
+				padding: 14px;
+				border: 1px solid #444;
+			}
+			.lineage-picker label,
+			.lineage-picker small {
+				display: block;
+			}
+			.lineage-picker label {
+				margin-bottom: 8px;
+				font-weight: bold;
+			}
+			.lineage-picker select {
+				width: 100%;
+				padding: 10px 12px;
+				font: inherit;
+				background: #181818;
+				color: #fff;
+				border: 1px solid #666;
+			}
+			.lineage-picker small {
+				margin-top: 7px;
+				opacity: 0.6;
+			}
 			#ready {
 				width: 100%;
 				margin-bottom: 12px;
@@ -177,7 +202,7 @@
 				<div class="creatures">
 					<div id="player-1" class="creature">
 						<strong>PLAYER 1</strong>
-						<div id="name-1" class="creature-name">Test Husk</div>
+						<div id="name-1" class="creature-name">Husk Demonym</div>
 						<div>Lineage: <span id="lineage-1">Husk</span></div>
 						<div class="stat">HP: <span id="hp-1">100</span>/<span id="max-hp-1">100</span></div>
 						<div class="stat">Energy: <span id="energy-1">7</span>/<span id="max-energy-1">10</span></div>
@@ -187,13 +212,19 @@
 
 					<div id="player-2" class="creature">
 						<strong>PLAYER 2</strong>
-						<div id="name-2" class="creature-name">Test Wisp</div>
+						<div id="name-2" class="creature-name">Wisp Demonym</div>
 						<div>Lineage: <span id="lineage-2">Wisp</span></div>
 						<div class="stat">HP: <span id="hp-2">100</span>/<span id="max-hp-2">100</span></div>
 						<div class="stat">Energy: <span id="energy-2">7</span>/<span id="max-energy-2">10</span></div>
 						<div class="status-list" id="statuses-2">No statuses</div>
 						<div class="ready-state" id="ready-2">Not ready</div>
 					</div>
+				</div>
+
+				<div class="lineage-picker">
+					<label for="lineage-select">YOUR LINEAGE</label>
+					<select id="lineage-select" disabled></select>
+					<small>Choose your lineage before pressing READY. The choice locks when you ready up.</small>
 				</div>
 
 				<div id="signal-toss"></div>
@@ -207,8 +238,8 @@
 				</div>
 
 				<div class="note">
-					v0.2.2 moveset test build. Move behavior is being aligned to the Cardputer BattleEngine; exact balance values are still test
-					values.
+					v0.2.3 lineage-select test build. All eight lineages use web test loadouts centered on their known signature moves; exact
+					Cardputer balance/loadout values are still awaiting source sync.
 				</div>
 			</section>
 		</main>
@@ -219,6 +250,7 @@
 			const createButton = document.querySelector('#create');
 			const joinButton = document.querySelector('#join');
 			const readyButton = document.querySelector('#ready');
+			const lineageSelect = document.querySelector('#lineage-select');
 			const movesContainer = document.querySelector('#moves');
 			const roomInput = document.querySelector('#room-code');
 			const currentRoom = document.querySelector('#current-room');
@@ -234,6 +266,7 @@
 			let connectedPlayers = [];
 			let state = null;
 			let moveLibrary = {};
+			let lineageLibrary = {};
 
 			const statusNames = {
 				stagger: 'Stagger',
@@ -281,6 +314,7 @@
 						state = message.state;
 						connectedPlayers = message.connectedPlayers ?? [];
 						moveLibrary = message.moveLibrary ?? {};
+						lineageLibrary = message.lineageLibrary ?? {};
 						playerLabel.textContent = `You are Player ${playerNumber}`;
 						player1Card.classList.toggle('you', playerNumber === 1);
 						player2Card.classList.toggle('you', playerNumber === 2);
@@ -292,6 +326,7 @@
 						state = message.state;
 						connectedPlayers = message.connectedPlayers ?? [];
 						moveLibrary = message.moveLibrary ?? moveLibrary;
+						lineageLibrary = message.lineageLibrary ?? lineageLibrary;
 						render();
 						return;
 					}
@@ -336,6 +371,27 @@
 				return move.energyCost + (disrupted ? 2 : 0);
 			}
 
+			function renderLineagePicker() {
+				if (!playerNumber || !state) return;
+
+				const creature = state.players[playerNumber - 1];
+				const currentOptions = [...lineageSelect.options].map((option) => option.value);
+				const libraryOptions = Object.values(lineageLibrary);
+
+				if (libraryOptions.length && currentOptions.length !== libraryOptions.length) {
+					lineageSelect.innerHTML = '';
+					for (const lineage of libraryOptions) {
+						const option = document.createElement('option');
+						option.value = lineage.id;
+						option.textContent = lineage.name;
+						lineageSelect.append(option);
+					}
+				}
+
+				lineageSelect.value = creature.lineage;
+				lineageSelect.disabled = state.started || state.ready[playerNumber - 1] || state.winner !== null;
+			}
+
 			function renderMoves() {
 				movesContainer.innerHTML = '';
 				if (!playerNumber || !state) return;
@@ -376,6 +432,7 @@
 				if (!state || !playerNumber) return;
 				renderCreature(1);
 				renderCreature(2);
+				renderLineagePicker();
 
 				player1Card.classList.toggle('active', state.turn === 1 && state.winner === null);
 				player2Card.classList.toggle('active', state.turn === 2 && state.winner === null);
@@ -417,6 +474,7 @@
 			roomInput.addEventListener('keydown', (event) => {
 				if (event.key === 'Enter') connectToRoom(roomInput.value);
 			});
+			lineageSelect.addEventListener('change', () => sendMessage({ type: 'select-lineage', lineage: lineageSelect.value }));
 			readyButton.addEventListener('click', () => sendMessage({ type: 'ready' }));
 		</script>
 	</body>
