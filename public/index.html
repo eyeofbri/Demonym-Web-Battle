@@ -154,6 +154,13 @@
 			.move .pressure {
 				opacity: 1;
 			}
+			.move.locked {
+				outline: 2px solid #fff;
+				outline-offset: -4px;
+			}
+			.move.recover {
+				grid-column: 1 / -1;
+			}
 			.log {
 				margin-top: 24px;
 				border-top: 1px solid #444;
@@ -238,8 +245,9 @@
 				</div>
 
 				<div class="note">
-					v0.2.3 lineage-select test build. All eight lineages use web test loadouts centered on their known signature moves; exact
-					Cardputer balance/loadout values are still awaiting source sync.
+					v0.2.4 round-lock test build. Both players choose secretly, then the server resolves the two locked moves in priority order.
+					Resolution priority alternates each round after the opening Signal Toss. Emergency Recover prevents Energy/status soft locks.
+					Exact Cardputer balance values are still awaiting source sync.
 				</div>
 			</section>
 		</main>
@@ -355,7 +363,11 @@
 				setText(`#max-hp-${player}`, creature.maxHp);
 				setText(`#energy-${player}`, creature.energy);
 				setText(`#max-energy-${player}`, creature.maxEnergy);
-				setText(`#ready-${player}`, state.ready[player - 1] ? 'Ready' : 'Not ready');
+				let readyLabel = state.ready[player - 1] ? 'Ready' : 'Not ready';
+				if (state.started && state.winner === null) {
+					readyLabel = state.lockedPlayers?.[player - 1] ? 'Move locked' : 'Choosing move';
+				}
+				setText(`#ready-${player}`, readyLabel);
 
 				const statuses = creature.statuses ?? [];
 				setText(
@@ -397,23 +409,36 @@
 				if (!playerNumber || !state) return;
 
 				const creature = state.players[playerNumber - 1];
-				const canAct =
-					state.started &&
-					state.winner === null &&
-					state.turn === playerNumber &&
-					connectedPlayers.includes(1) &&
-					connectedPlayers.includes(2);
+				const bothConnected = connectedPlayers.includes(1) && connectedPlayers.includes(2);
+				const alreadyLocked = Boolean(state.lockedPlayers?.[playerNumber - 1]);
+				const canLock = state.started && state.winner === null && state.phase === 'selecting' && !alreadyLocked && bothConnected;
+				let affordableCount = 0;
 
 				for (const moveId of creature.moves) {
 					const move = moveLibrary[moveId];
 					if (!move) continue;
 
 					const cost = currentMoveCost(creature, move);
+					const affordable = creature.energy >= cost;
+					if (affordable) affordableCount += 1;
+
 					const button = document.createElement('button');
 					button.className = 'move';
-					button.disabled = !canAct || creature.energy < cost;
-					button.innerHTML = `<strong>${move.name}</strong><small class="pressure">${move.pressure.toUpperCase()} · ${move.accuracy}% · ${cost} EN</small><small>${move.description}</small>`;
+					if (state.yourLockedMoveId === move.id) button.classList.add('locked');
+					button.disabled = !canLock || !affordable;
+					button.innerHTML = `<strong>${move.name}${state.yourLockedMoveId === move.id ? ' · LOCKED' : ''}</strong><small class="pressure">${move.pressure.toUpperCase()} · ${move.accuracy}% · ${cost} EN</small><small>${move.description}</small>`;
 					button.addEventListener('click', () => sendMessage({ type: 'move', moveId: move.id }));
+					movesContainer.append(button);
+				}
+
+				const showRecover = (canLock && affordableCount === 0) || state.yourLockedMoveId === 'recover';
+				if (showRecover) {
+					const button = document.createElement('button');
+					button.className = 'move recover';
+					if (state.yourLockedMoveId === 'recover') button.classList.add('locked');
+					button.disabled = !canLock;
+					button.innerHTML = `<strong>Recover${state.yourLockedMoveId === 'recover' ? ' · LOCKED' : ''}</strong><small class="pressure">UTILITY · 0 EN</small><small>No move is affordable. Recover Energy and stay in the round.</small>`;
+					button.addEventListener('click', () => sendMessage({ type: 'recover' }));
 					movesContainer.append(button);
 				}
 			}
@@ -434,13 +459,19 @@
 				renderCreature(2);
 				renderLineagePicker();
 
-				player1Card.classList.toggle('active', state.turn === 1 && state.winner === null);
-				player2Card.classList.toggle('active', state.turn === 2 && state.winner === null);
+				player1Card.classList.toggle('active', state.started && state.roundFirstPlayer === 1 && state.winner === null);
+				player2Card.classList.toggle('active', state.started && state.roundFirstPlayer === 2 && state.winner === null);
 
 				const bothConnected = connectedPlayers.includes(1) && connectedPlayers.includes(2);
 				const playerReady = state.ready[playerNumber - 1];
+				const myLocked = Boolean(state.lockedPlayers?.[playerNumber - 1]);
+				const opponent = playerNumber === 1 ? 2 : 1;
+				const opponentLocked = Boolean(state.lockedPlayers?.[opponent - 1]);
+
 				signalToss.textContent =
-					state.started && state.initiativeWinner ? `SIGNAL TOSS: Player ${state.initiativeWinner} moves first.` : '';
+					state.started && state.initiativeWinner
+						? `SIGNAL TOSS: Player ${state.initiativeWinner} gets Round 1 priority. Round ${state.round}: Player ${state.roundFirstPlayer} resolves first.`
+						: '';
 				readyButton.disabled = !bothConnected || playerReady || state.winner !== null;
 
 				if (state.winner !== null) {
@@ -449,10 +480,12 @@
 					status.textContent = 'Waiting for opponent...';
 				} else if (!state.ready[0] || !state.ready[1]) {
 					status.textContent = playerReady ? 'Ready. Waiting for opponent...' : 'Opponent connected. Press READY.';
-				} else if (state.turn === playerNumber) {
-					status.textContent = 'Your turn.';
+				} else if (myLocked) {
+					status.textContent = opponentLocked ? 'Both moves locked. Resolving...' : `Move locked. Waiting for Player ${opponent}.`;
+				} else if (opponentLocked) {
+					status.textContent = `Player ${opponent} locked in. Choose your Round ${state.round} move.`;
 				} else {
-					status.textContent = `Player ${state.turn}'s turn.`;
+					status.textContent = `Round ${state.round}: choose and lock in your move.`;
 				}
 
 				renderMoves();

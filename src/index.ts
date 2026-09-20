@@ -4,6 +4,7 @@ type PlayerNumber = 1 | 2;
 type Lineage = 'Husk' | 'Mire' | 'Wisp' | 'Fang' | 'Choir' | 'Machine' | 'Cinder' | 'Veil';
 type Pressure = 'Neutral' | 'Force' | 'Signal' | 'Heat' | 'Corrosion' | 'Echo';
 type MoveRole = 'attack' | 'guard' | 'heal' | 'utility';
+type BattlePhase = 'waiting' | 'selecting' | 'finished';
 type StatusId = 'stagger' | 'disruption' | 'burn' | 'corrosion' | 'echo-interference' | 'evasion' | 'ward';
 
 type MoveId =
@@ -54,13 +55,17 @@ interface CreatureState {
 }
 
 interface BattleState {
-	version: 5;
+	version: 6;
 	players: [CreatureState, CreatureState];
 	ready: [boolean, boolean];
 	started: boolean;
-	turn: PlayerNumber | null;
+	phase: BattlePhase;
+	round: number;
+	roundFirstPlayer: PlayerNumber | null;
 	initiativeWinner: PlayerNumber | null;
 	winner: PlayerNumber | null;
+	lockedMoves: [MoveId | 'recover' | null, MoveId | 'recover' | null];
+	lockedCosts: [number | null, number | null];
 	log: string[];
 }
 
@@ -250,7 +255,7 @@ const MOVE_LIBRARY: Record<MoveId, MoveDefinition> = {
 };
 
 /*
- * v0.2.3 lineage presets. These are WEB TEST LOADOUTS built around the known
+ * v0.2.3+ lineage presets. These are WEB TEST LOADOUTS built around the known
  * Demonym move vocabulary and each lineage's signature move. They make every
  * lineage/signature selectable for multiplayer testing without pretending the
  * private Cardputer learned-move table has already been synced.
@@ -269,7 +274,8 @@ const LINEAGE_LIBRARY: Record<Lineage, LineageDefinition> = {
 const STARTING_HP = 100;
 const STARTING_ENERGY = 7;
 const MAX_ENERGY = 10;
-const ENERGY_RECOVERY_PER_TURN = 1;
+const ENERGY_RECOVERY_PER_ROUND = 1;
+const EMERGENCY_RECOVER_ENERGY = 2;
 const MAX_LOG_ENTRIES = 24;
 const DISRUPTION_EXTRA_COST = 2;
 const WARD_DAMAGE_REDUCTION = 0.5;
@@ -308,13 +314,17 @@ function randomPercent(): number {
 
 function createInitialState(): BattleState {
 	return {
-		version: 5,
+		version: 6,
 		players: [createCreature(1), createCreature(2)],
 		ready: [false, false],
 		started: false,
-		turn: null,
+		phase: 'waiting',
+		round: 0,
+		roundFirstPlayer: null,
 		initiativeWinner: null,
 		winner: null,
+		lockedMoves: [null, null],
+		lockedCosts: [null, null],
 		log: ['Battle room created.'],
 	};
 }
@@ -395,11 +405,26 @@ function effectiveAccuracy(attacker: CreatureState, defender: CreatureState, mov
 	return Math.max(20, Math.min(100, accuracy));
 }
 
+function otherPlayer(player: PlayerNumber): PlayerNumber {
+	return player === 1 ? 2 : 1;
+}
+
+function affordableMoves(creature: CreatureState): MoveId[] {
+	return creature.moves.filter((moveId) => {
+		const move = MOVE_LIBRARY[moveId];
+		return creature.energy >= effectiveEnergyCost(creature, move);
+	});
+}
+
+function isOffensiveMove(move: MoveDefinition): boolean {
+	return move.role === 'attack' || (move.role === 'utility' && move.power > 0);
+}
+
 export class BattleRoom extends DurableObject<Env> {
 	private async getState(): Promise<BattleState> {
 		const storedState = await this.ctx.storage.get<BattleState | { version?: number }>('state');
 
-		if (!storedState || storedState.version !== 5) {
+		if (!storedState || storedState.version !== 6) {
 			const state = createInitialState();
 			await this.ctx.storage.put('state', state);
 			return state;
@@ -440,17 +465,34 @@ export class BattleRoom extends DurableObject<Env> {
 		await this.broadcastState(state);
 	}
 
-	private async broadcastState(existingState?: BattleState) {
-		const state = existingState ?? (await this.getState());
-		const message = JSON.stringify({
-			type: 'state',
-			state,
+	private stateForPlayer(state: BattleState, player: PlayerNumber) {
+		const { lockedMoves, lockedCosts: _lockedCosts, ...publicState } = state;
+		return {
+			...publicState,
+			lockedPlayers: [lockedMoves[0] !== null, lockedMoves[1] !== null],
+			yourLockedMoveId: lockedMoves[player - 1],
+		};
+	}
+
+	private sendState(socket: WebSocket, state: BattleState, player: PlayerNumber, type: 'welcome' | 'state' = 'state') {
+		this.send(socket, {
+			type,
+			...(type === 'welcome' ? { player } : {}),
+			state: this.stateForPlayer(state, player),
 			connectedPlayers: this.getConnectedPlayers(),
 			moveLibrary: MOVE_LIBRARY,
 			lineageLibrary: LINEAGE_LIBRARY,
 		});
+	}
 
-		for (const socket of this.ctx.getWebSockets()) socket.send(message);
+	private async broadcastState(existingState?: BattleState) {
+		const state = existingState ?? (await this.getState());
+
+		for (const socket of this.ctx.getWebSockets()) {
+			const attachment = socket.deserializeAttachment() as SocketAttachment | null;
+			if (!attachment?.player) continue;
+			this.sendState(socket, state, attachment.player);
+		}
 	}
 
 	private async handleReady(socket: WebSocket, player: PlayerNumber) {
@@ -469,10 +511,15 @@ export class BattleRoom extends DurableObject<Env> {
 		if (state.ready[0] && state.ready[1] && this.bothPlayersConnected()) {
 			const startingPlayer = pickStartingPlayer();
 			state.started = true;
-			state.turn = startingPlayer;
+			state.phase = 'selecting';
+			state.round = 1;
+			state.roundFirstPlayer = startingPlayer;
 			state.initiativeWinner = startingPlayer;
+			state.lockedMoves = [null, null];
+			state.lockedCosts = [null, null];
 			this.addLog(state, 'Both players ready. Signal Toss...');
-			this.addLog(state, `Player ${startingPlayer} wins the Signal Toss and moves first.`);
+			this.addLog(state, `Player ${startingPlayer} wins the Signal Toss and has first resolution priority.`);
+			this.addLog(state, 'Round 1: both players lock in a move.');
 		}
 
 		await this.saveAndBroadcast(state);
@@ -591,7 +638,7 @@ export class BattleRoom extends DurableObject<Env> {
 		}
 	}
 
-	private applyEndOfTurn(state: BattleState, playerWhoActed: PlayerNumber) {
+	private applyEndOfRound(state: BattleState) {
 		for (let index = 0; index < state.players.length; index++) {
 			const creature = state.players[index];
 			const label = `Player ${index + 1}`;
@@ -607,33 +654,133 @@ export class BattleRoom extends DurableObject<Env> {
 			}
 
 			creature.statuses = creature.statuses.filter((status) => status.turns > 0);
+			creature.energy = Math.min(creature.maxEnergy, creature.energy + ENERGY_RECOVERY_PER_ROUND);
 		}
-
-		const opponent: PlayerNumber = playerWhoActed === 1 ? 2 : 1;
-		const next = state.players[opponent - 1];
-		next.energy = Math.min(next.maxEnergy, next.energy + ENERGY_RECOVERY_PER_TURN);
 	}
 
-	private async handleMove(socket: WebSocket, player: PlayerNumber, rawMoveId?: string) {
+	private resolveLockedAction(state: BattleState, player: PlayerNumber) {
+		const opponent = otherPlayer(player);
+		const attacker = state.players[player - 1];
+		const defender = state.players[opponent - 1];
+		const action = state.lockedMoves[player - 1];
+		const reservedCost = state.lockedCosts[player - 1] ?? 0;
+
+		if (!action || attacker.hp <= 0 || state.winner !== null) return;
+
+		if (action === 'recover') {
+			const before = attacker.energy;
+			attacker.energy = Math.min(attacker.maxEnergy, attacker.energy + EMERGENCY_RECOVER_ENERGY);
+			this.addLog(state, `Player ${player} recovered ${attacker.energy - before} Energy.`);
+			return;
+		}
+
+		const move = MOVE_LIBRARY[action];
+		attacker.energy = Math.max(0, attacker.energy - reservedCost);
+
+		const accuracy = effectiveAccuracy(attacker, defender, move);
+		const hit = move.accuracy >= 100 || randomPercent() < accuracy;
+
+		if (!hit) {
+			this.addLog(state, `Player ${player} used ${move.name}, but it missed.`);
+		} else {
+			this.resolveMoveEffect(state, player, move);
+		}
+
+		if (isOffensiveMove(move) && hasStatus(defender, 'evasion')) {
+			removeStatus(defender, 'evasion');
+		}
+
+		attacker.lastMoveId = action;
+
+		if (defender.hp <= 0) {
+			state.winner = player;
+			state.phase = 'finished';
+			this.addLog(state, `Player ${player} wins.`);
+		} else if (attacker.hp <= 0) {
+			state.winner = opponent;
+			state.phase = 'finished';
+			this.addLog(state, `Player ${opponent} wins.`);
+		}
+	}
+
+	private resolveRound(state: BattleState) {
+		if (!state.lockedMoves[0] || !state.lockedMoves[1] || !state.roundFirstPlayer) return;
+
+		const first = state.roundFirstPlayer;
+		const second = otherPlayer(first);
+		this.addLog(state, `Round ${state.round}: both moves locked. Resolving Player ${first} first.`);
+
+		this.resolveLockedAction(state, first);
+		if (state.winner === null) this.resolveLockedAction(state, second);
+
+		if (state.winner !== null) {
+			state.lockedMoves = [null, null];
+			state.lockedCosts = [null, null];
+			return;
+		}
+
+		this.applyEndOfRound(state);
+		state.round += 1;
+		state.roundFirstPlayer = second;
+		state.lockedMoves = [null, null];
+		state.lockedCosts = [null, null];
+		this.addLog(state, `Round ${state.round}: both players lock in a move. Player ${state.roundFirstPlayer} resolves first.`);
+	}
+
+	private async lockAction(socket: WebSocket, player: PlayerNumber, action: MoveId | 'recover', cost: number) {
+		const state = await this.getState();
+
 		if (!this.bothPlayersConnected()) {
 			this.send(socket, { type: 'error', message: 'Waiting for another player.' });
 			return;
 		}
 
-		const state = await this.getState();
-
-		if (state.winner !== null) {
+		if (state.winner !== null || state.phase === 'finished') {
 			this.send(socket, { type: 'error', message: 'This battle is already over.' });
 			return;
 		}
 
-		if (!state.started || !state.ready[0] || !state.ready[1]) {
+		if (!state.started || !state.ready[0] || !state.ready[1] || state.phase !== 'selecting') {
 			this.send(socket, { type: 'error', message: 'Both players must be ready before battling.' });
 			return;
 		}
 
-		if (state.turn !== player) {
-			this.send(socket, { type: 'error', message: 'It is not your turn.' });
+		if (state.lockedMoves[player - 1] !== null) {
+			this.send(socket, { type: 'error', message: 'Your move is already locked for this round.' });
+			return;
+		}
+
+		state.lockedMoves[player - 1] = action;
+		state.lockedCosts[player - 1] = cost;
+		this.addLog(state, `Player ${player} locked in a move.`);
+
+		if (state.lockedMoves[0] !== null && state.lockedMoves[1] !== null) {
+			this.resolveRound(state);
+		}
+
+		await this.saveAndBroadcast(state);
+	}
+
+	private async handleMove(socket: WebSocket, player: PlayerNumber, rawMoveId?: string) {
+		const state = await this.getState();
+
+		if (!this.bothPlayersConnected()) {
+			this.send(socket, { type: 'error', message: 'Waiting for another player.' });
+			return;
+		}
+
+		if (state.winner !== null || state.phase === 'finished') {
+			this.send(socket, { type: 'error', message: 'This battle is already over.' });
+			return;
+		}
+
+		if (!state.started || !state.ready[0] || !state.ready[1] || state.phase !== 'selecting') {
+			this.send(socket, { type: 'error', message: 'Both players must be ready before battling.' });
+			return;
+		}
+
+		if (state.lockedMoves[player - 1] !== null) {
+			this.send(socket, { type: 'error', message: 'Your move is already locked for this round.' });
 			return;
 		}
 
@@ -645,8 +792,6 @@ export class BattleRoom extends DurableObject<Env> {
 		const moveId = rawMoveId as MoveId;
 		const move = MOVE_LIBRARY[moveId];
 		const attacker = state.players[player - 1];
-		const opponent: PlayerNumber = player === 1 ? 2 : 1;
-		const defender = state.players[opponent - 1];
 
 		if (!attacker.moves.includes(moveId)) {
 			this.send(socket, { type: 'error', message: 'That creature does not know this move.' });
@@ -659,37 +804,29 @@ export class BattleRoom extends DurableObject<Env> {
 			return;
 		}
 
-		attacker.energy -= cost;
+		await this.lockAction(socket, player, moveId, cost);
+	}
 
-		const accuracy = effectiveAccuracy(attacker, defender, move);
-		const hit = move.accuracy >= 100 || randomPercent() < accuracy;
+	private async handleRecover(socket: WebSocket, player: PlayerNumber) {
+		const state = await this.getState();
 
-		if (!hit) {
-			this.addLog(state, `Player ${player} used ${move.name}, but it missed.`);
-		} else {
-			this.resolveMoveEffect(state, player, move);
+		if (!state.started || state.phase !== 'selecting' || state.winner !== null) {
+			this.send(socket, { type: 'error', message: 'Recover is not available right now.' });
+			return;
 		}
 
-		if (hasStatus(defender, 'evasion')) {
-			removeStatus(defender, 'evasion');
+		if (state.lockedMoves[player - 1] !== null) {
+			this.send(socket, { type: 'error', message: 'Your move is already locked for this round.' });
+			return;
 		}
 
-		attacker.lastMoveId = moveId;
-		this.applyEndOfTurn(state, player);
-
-		if (defender.hp <= 0) {
-			state.winner = player;
-			state.turn = null;
-			this.addLog(state, `Player ${player} wins.`);
-		} else if (attacker.hp <= 0) {
-			state.winner = opponent;
-			state.turn = null;
-			this.addLog(state, `Player ${opponent} wins.`);
-		} else {
-			state.turn = opponent;
+		const creature = state.players[player - 1];
+		if (affordableMoves(creature).length > 0) {
+			this.send(socket, { type: 'error', message: 'Recover is only available when no moves can be afforded.' });
+			return;
 		}
 
-		await this.saveAndBroadcast(state);
+		await this.lockAction(socket, player, 'recover', 0);
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -709,14 +846,7 @@ export class BattleRoom extends DurableObject<Env> {
 		server.serializeAttachment({ player } satisfies SocketAttachment);
 
 		const state = await this.getState();
-		this.send(server, {
-			type: 'welcome',
-			player,
-			state,
-			connectedPlayers: this.getConnectedPlayers(),
-			moveLibrary: MOVE_LIBRARY,
-			lineageLibrary: LINEAGE_LIBRARY,
-		});
+		this.sendState(server, state, player, 'welcome');
 
 		await this.broadcastState(state);
 		return new Response(null, { status: 101, webSocket: client });
@@ -746,7 +876,12 @@ export class BattleRoom extends DurableObject<Env> {
 			return;
 		}
 
-		if (data.type === 'move') await this.handleMove(socket, attachment.player, data.moveId);
+		if (data.type === 'move') {
+			await this.handleMove(socket, attachment.player, data.moveId);
+			return;
+		}
+
+		if (data.type === 'recover') await this.handleRecover(socket, attachment.player);
 	}
 
 	async webSocketClose(socket: WebSocket, _code: number, _reason: string, _wasClean: boolean) {
@@ -756,8 +891,12 @@ export class BattleRoom extends DurableObject<Env> {
 		if (attachment?.player && state.winner === null) {
 			state.ready[attachment.player - 1] = false;
 			state.started = false;
-			state.turn = null;
+			state.phase = 'waiting';
+			state.round = 0;
+			state.roundFirstPlayer = null;
 			state.initiativeWinner = null;
+			state.lockedMoves = [null, null];
+			state.lockedCosts = [null, null];
 			this.addLog(state, `Player ${attachment.player} disconnected. Battle paused.`);
 			await this.ctx.storage.put('state', state);
 		}
