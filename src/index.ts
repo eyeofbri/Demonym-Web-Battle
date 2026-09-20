@@ -1,15 +1,43 @@
 import { DurableObject } from 'cloudflare:workers';
 
 type PlayerNumber = 1 | 2;
+type Pressure = 'Neutral' | 'Force' | 'Signal' | 'Heat' | 'Corrosion' | 'Echo';
+type MoveRole = 'attack' | 'guard' | 'heal' | 'utility';
+type StatusId = 'stagger' | 'disruption' | 'burn' | 'corrosion' | 'echo-interference' | 'evasion' | 'ward';
 
-type MoveId = 'pulse-strike' | 'signal-burst';
+type MoveId =
+	| 'pulse-strike'
+	| 'quiet-ward'
+	| 'restore-pulse'
+	| 'signal-snare'
+	| 'overcharge'
+	| 'rend'
+	| 'reckless-rush'
+	| 'shell-brace'
+	| 'bog-leech'
+	| 'phase-feint'
+	| 'pursuit-bite'
+	| 'chorus-echo'
+	| 'panel-shift'
+	| 'ember-spire'
+	| 'veil-snare';
+
+interface StatusState {
+	id: StatusId;
+	turns: number;
+	stacks?: number;
+}
 
 interface MoveDefinition {
 	id: MoveId;
 	name: string;
-	damage: number;
+	pressure: Pressure;
+	role: MoveRole;
 	energyCost: number;
+	accuracy: number;
+	power: number;
 	description: string;
+	signatureOf?: string;
 }
 
 interface CreatureState {
@@ -20,11 +48,12 @@ interface CreatureState {
 	energy: number;
 	maxEnergy: number;
 	moves: MoveId[];
-	statuses: string[];
+	statuses: StatusState[];
+	lastMoveId: MoveId | null;
 }
 
 interface BattleState {
-	version: 3;
+	version: 4;
 	players: [CreatureState, CreatureState];
 	ready: [boolean, boolean];
 	started: boolean;
@@ -43,39 +72,213 @@ interface ClientMessage {
 	moveId?: string;
 }
 
+/*
+ * v0.2.2 introduces Demonym's real move vocabulary and effect model.
+ *
+ * IMPORTANT: numeric values below are WEB TEST BALANCE, not a claim that they
+ * are the final Cardputer BattleEngine values. The public Demonym material does
+ * not contain the complete private balance table. Keep move behavior/data in
+ * this one library so exact firmware values can replace these numbers later.
+ */
 const MOVE_LIBRARY: Record<MoveId, MoveDefinition> = {
 	'pulse-strike': {
 		id: 'pulse-strike',
 		name: 'Pulse Strike',
-		damage: 12,
-		energyCost: 0,
-		description: 'Reliable test attack.',
+		pressure: 'Neutral',
+		role: 'attack',
+		energyCost: 1,
+		accuracy: 96,
+		power: 14,
+		description: 'Reliable low-cost damaging hit.',
 	},
-	'signal-burst': {
-		id: 'signal-burst',
-		name: 'Signal Burst',
-		damage: 20,
+	'quiet-ward': {
+		id: 'quiet-ward',
+		name: 'Quiet Ward',
+		pressure: 'Neutral',
+		role: 'guard',
+		energyCost: 2,
+		accuracy: 100,
+		power: 0,
+		description: 'Raises a ward to soften the next incoming hit.',
+	},
+	'restore-pulse': {
+		id: 'restore-pulse',
+		name: 'Restore Pulse',
+		pressure: 'Neutral',
+		role: 'heal',
+		energyCost: 3,
+		accuracy: 100,
+		power: 22,
+		description: 'Restores Health.',
+	},
+	'signal-snare': {
+		id: 'signal-snare',
+		name: 'Signal Snare',
+		pressure: 'Signal',
+		role: 'utility',
+		energyCost: 2,
+		accuracy: 90,
+		power: 7,
+		description: 'Applies Disruption, increasing enemy Energy costs.',
+	},
+	'overcharge': {
+		id: 'overcharge',
+		name: 'Overcharge',
+		pressure: 'Signal',
+		role: 'attack',
+		energyCost: 5,
+		accuracy: 88,
+		power: 28,
+		description: 'High-output Signal attack with a heavy Energy cost.',
+	},
+	'rend': {
+		id: 'rend',
+		name: 'Rend',
+		pressure: 'Force',
+		role: 'attack',
+		energyCost: 3,
+		accuracy: 86,
+		power: 24,
+		description: 'Strong Force hit with lower accuracy.',
+	},
+	'reckless-rush': {
+		id: 'reckless-rush',
+		name: 'Reckless Rush',
+		pressure: 'Force',
+		role: 'attack',
 		energyCost: 4,
-		description: 'Stronger attack with an energy cost.',
+		accuracy: 82,
+		power: 32,
+		description: 'Very heavy hit that also hurts the user.',
+	},
+	'shell-brace': {
+		id: 'shell-brace',
+		name: 'Shell Brace',
+		pressure: 'Force',
+		role: 'guard',
+		energyCost: 3,
+		accuracy: 100,
+		power: 10,
+		description: 'Husk signature. Clears Stagger, restores Health, and braces for impact.',
+		signatureOf: 'Husk',
+	},
+	'bog-leech': {
+		id: 'bog-leech',
+		name: 'Bog Leech',
+		pressure: 'Corrosion',
+		role: 'attack',
+		energyCost: 3,
+		accuracy: 92,
+		power: 16,
+		description: 'Mire signature. Drains Health and improves against Corroded targets.',
+		signatureOf: 'Mire',
+	},
+	'phase-feint': {
+		id: 'phase-feint',
+		name: 'Phase Feint',
+		pressure: 'Signal',
+		role: 'utility',
+		energyCost: 2,
+		accuracy: 100,
+		power: 0,
+		description: 'Wisp signature. Boosts evasion against the next incoming move.',
+		signatureOf: 'Wisp',
+	},
+	'pursuit-bite': {
+		id: 'pursuit-bite',
+		name: 'Pursuit Bite',
+		pressure: 'Force',
+		role: 'attack',
+		energyCost: 3,
+		accuracy: 94,
+		power: 18,
+		description: 'Fang signature. A finisher that hits harder against weakened targets.',
+		signatureOf: 'Fang',
+	},
+	'chorus-echo': {
+		id: 'chorus-echo',
+		name: 'Chorus Echo',
+		pressure: 'Echo',
+		role: 'attack',
+		energyCost: 3,
+		accuracy: 92,
+		power: 16,
+		description: 'Choir signature. Feeds on existing Echo Interference or Burn.',
+		signatureOf: 'Choir',
+	},
+	'panel-shift': {
+		id: 'panel-shift',
+		name: 'Panel Shift',
+		pressure: 'Signal',
+		role: 'utility',
+		energyCost: 1,
+		accuracy: 100,
+		power: 3,
+		description: 'Machine signature. Clears signal noise and restores Energy.',
+		signatureOf: 'Machine',
+	},
+	'ember-spire': {
+		id: 'ember-spire',
+		name: 'Ember Spire',
+		pressure: 'Heat',
+		role: 'attack',
+		energyCost: 4,
+		accuracy: 90,
+		power: 20,
+		description: 'Cinder signature. Spikes an existing Burn without recoil.',
+		signatureOf: 'Cinder',
+	},
+	'veil-snare': {
+		id: 'veil-snare',
+		name: 'Veil Snare',
+		pressure: 'Echo',
+		role: 'utility',
+		energyCost: 3,
+		accuracy: 92,
+		power: 9,
+		description: 'Veil signature. Applies or deepens Echo Interference.',
+		signatureOf: 'Veil',
 	},
 };
 
 const STARTING_HP = 100;
-const STARTING_ENERGY = 6;
+const STARTING_ENERGY = 7;
 const MAX_ENERGY = 10;
 const ENERGY_RECOVERY_PER_TURN = 1;
-const MAX_LOG_ENTRIES = 16;
+const MAX_LOG_ENTRIES = 24;
+const DISRUPTION_EXTRA_COST = 2;
+const WARD_DAMAGE_REDUCTION = 0.5;
+const EVASION_BONUS = 20;
+const BURN_DAMAGE = 4;
+const CORROSION_DAMAGE_MULTIPLIER = 1.2;
 
 function createCreature(player: PlayerNumber): CreatureState {
+	// These are mixed TEST LOADOUTS used to exercise the web resolver. They are
+	// not intended to replace the Cardputer's final learned/active move tables.
+	if (player === 1) {
+		return {
+			name: 'Test Husk',
+			lineage: 'Husk',
+			hp: STARTING_HP,
+			maxHp: STARTING_HP,
+			energy: STARTING_ENERGY,
+			maxEnergy: MAX_ENERGY,
+			moves: ['pulse-strike', 'quiet-ward', 'rend', 'shell-brace'],
+			statuses: [],
+			lastMoveId: null,
+		};
+	}
+
 	return {
-		name: `Test Creature ${player}`,
-		lineage: player === 1 ? 'Husk' : 'Wisp',
+		name: 'Test Wisp',
+		lineage: 'Wisp',
 		hp: STARTING_HP,
 		maxHp: STARTING_HP,
 		energy: STARTING_ENERGY,
 		maxEnergy: MAX_ENERGY,
-		moves: ['pulse-strike', 'signal-burst'],
+		moves: ['pulse-strike', 'signal-snare', 'restore-pulse', 'phase-feint'],
 		statuses: [],
+		lastMoveId: null,
 	};
 }
 
@@ -85,9 +288,15 @@ function pickStartingPlayer(): PlayerNumber {
 	return byte[0] % 2 === 0 ? 1 : 2;
 }
 
+function randomPercent(): number {
+	const bytes = new Uint32Array(1);
+	crypto.getRandomValues(bytes);
+	return bytes[0] / 0xffffffff * 100;
+}
+
 function createInitialState(): BattleState {
 	return {
-		version: 3,
+		version: 4,
 		players: [createCreature(1), createCreature(2)],
 		ready: [false, false],
 		started: false,
@@ -98,12 +307,87 @@ function createInitialState(): BattleState {
 	};
 }
 
+function getStatus(creature: CreatureState, id: StatusId): StatusState | undefined {
+	return creature.statuses.find((status) => status.id === id);
+}
+
+function hasStatus(creature: CreatureState, id: StatusId): boolean {
+	return Boolean(getStatus(creature, id));
+}
+
+function removeStatus(creature: CreatureState, id: StatusId): boolean {
+	const before = creature.statuses.length;
+	creature.statuses = creature.statuses.filter((status) => status.id !== id);
+	return creature.statuses.length !== before;
+}
+
+function addOrRefreshStatus(creature: CreatureState, id: StatusId, turns: number, stack = false) {
+	const existing = getStatus(creature, id);
+
+	if (!existing) {
+		creature.statuses.push({ id, turns, stacks: 1 });
+		return;
+	}
+
+	existing.turns = Math.max(existing.turns, turns);
+	if (stack) {
+		existing.stacks = Math.min(3, (existing.stacks ?? 1) + 1);
+	}
+}
+
+function healCreature(creature: CreatureState, amount: number): number {
+	let adjusted = amount;
+
+	if (hasStatus(creature, 'corrosion')) {
+		adjusted = Math.ceil(adjusted / 2);
+	}
+
+	const before = creature.hp;
+	creature.hp = Math.min(creature.maxHp, creature.hp + adjusted);
+	return creature.hp - before;
+}
+
+function damageCreature(creature: CreatureState, amount: number): number {
+	let adjusted = amount;
+
+	if (hasStatus(creature, 'ward')) {
+		adjusted = Math.max(1, Math.round(adjusted * WARD_DAMAGE_REDUCTION));
+		removeStatus(creature, 'ward');
+	}
+
+	if (hasStatus(creature, 'corrosion')) {
+		adjusted = Math.max(1, Math.round(adjusted * CORROSION_DAMAGE_MULTIPLIER));
+	}
+
+	const before = creature.hp;
+	creature.hp = Math.max(0, creature.hp - adjusted);
+	return before - creature.hp;
+}
+
+function effectiveEnergyCost(creature: CreatureState, move: MoveDefinition): number {
+	return move.energyCost + (hasStatus(creature, 'disruption') ? DISRUPTION_EXTRA_COST : 0);
+}
+
+function effectiveAccuracy(attacker: CreatureState, defender: CreatureState, move: MoveDefinition): number {
+	let accuracy = move.accuracy;
+
+	if (hasStatus(attacker, 'echo-interference')) {
+		const stacks = getStatus(attacker, 'echo-interference')?.stacks ?? 1;
+		accuracy -= 8 * stacks;
+	}
+
+	if (hasStatus(defender, 'evasion')) {
+		accuracy -= EVASION_BONUS;
+	}
+
+	return Math.max(20, Math.min(100, accuracy));
+}
+
 export class BattleRoom extends DurableObject<Env> {
 	private async getState(): Promise<BattleState> {
 		const storedState = await this.ctx.storage.get<BattleState | { version?: number }>('state');
 
-		// Older rooms used a different state shape. Reset those rooms cleanly.
-		if (!storedState || storedState.version !== 3) {
+		if (!storedState || storedState.version !== 4) {
 			const state = createInitialState();
 			await this.ctx.storage.put('state', state);
 			return state;
@@ -117,10 +401,7 @@ export class BattleRoom extends DurableObject<Env> {
 
 		for (const socket of this.ctx.getWebSockets()) {
 			const attachment = socket.deserializeAttachment() as SocketAttachment | null;
-
-			if (attachment?.player) {
-				players.add(attachment.player);
-			}
+			if (attachment?.player) players.add(attachment.player);
 		}
 
 		return [...players].sort() as PlayerNumber[];
@@ -132,10 +413,14 @@ export class BattleRoom extends DurableObject<Env> {
 
 	private addLog(state: BattleState, message: string) {
 		state.log.push(message);
-
 		if (state.log.length > MAX_LOG_ENTRIES) {
 			state.log.splice(0, state.log.length - MAX_LOG_ENTRIES);
 		}
+	}
+
+	private bothPlayersConnected(): boolean {
+		const connected = this.getConnectedPlayers();
+		return connected.includes(1) && connected.includes(2);
 	}
 
 	private async saveAndBroadcast(state: BattleState) {
@@ -145,50 +430,34 @@ export class BattleRoom extends DurableObject<Env> {
 
 	private async broadcastState(existingState?: BattleState) {
 		const state = existingState ?? (await this.getState());
-		const connectedPlayers = this.getConnectedPlayers();
-
 		const message = JSON.stringify({
 			type: 'state',
 			state,
-			connectedPlayers,
+			connectedPlayers: this.getConnectedPlayers(),
 			moveLibrary: MOVE_LIBRARY,
 		});
 
-		for (const socket of this.ctx.getWebSockets()) {
-			socket.send(message);
-		}
-	}
-
-	private bothPlayersConnected(): boolean {
-		const connected = this.getConnectedPlayers();
-		return connected.includes(1) && connected.includes(2);
+		for (const socket of this.ctx.getWebSockets()) socket.send(message);
 	}
 
 	private async handleReady(socket: WebSocket, player: PlayerNumber) {
 		const state = await this.getState();
 
 		if (state.winner !== null) {
-			this.send(socket, {
-				type: 'error',
-				message: 'This battle is already over.',
-			});
+			this.send(socket, { type: 'error', message: 'This battle is already over.' });
 			return;
 		}
 
-		if (state.ready[player - 1]) {
-			return;
-		}
+		if (state.ready[player - 1]) return;
 
 		state.ready[player - 1] = true;
 		this.addLog(state, `Player ${player} is ready.`);
 
 		if (state.ready[0] && state.ready[1] && this.bothPlayersConnected()) {
 			const startingPlayer = pickStartingPlayer();
-
 			state.started = true;
 			state.turn = startingPlayer;
 			state.initiativeWinner = startingPlayer;
-
 			this.addLog(state, 'Both players ready. Signal Toss...');
 			this.addLog(state, `Player ${startingPlayer} wins the Signal Toss and moves first.`);
 		}
@@ -196,84 +465,188 @@ export class BattleRoom extends DurableObject<Env> {
 		await this.saveAndBroadcast(state);
 	}
 
+	private resolveMoveEffect(state: BattleState, player: PlayerNumber, move: MoveDefinition) {
+		const opponent: PlayerNumber = player === 1 ? 2 : 1;
+		const attacker = state.players[player - 1];
+		const defender = state.players[opponent - 1];
+		const attackerLabel = `Player ${player}`;
+		const defenderLabel = `Player ${opponent}`;
+
+		if (move.id === 'quiet-ward') {
+			addOrRefreshStatus(attacker, 'ward', 2);
+			this.addLog(state, `${attackerLabel} raised Quiet Ward.`);
+			return;
+		}
+
+		if (move.id === 'restore-pulse') {
+			const healed = healCreature(attacker, move.power);
+			this.addLog(state, `${attackerLabel} used Restore Pulse and restored ${healed} HP.`);
+			return;
+		}
+
+		if (move.id === 'shell-brace') {
+			const cleared = removeStatus(attacker, 'stagger');
+			const healed = healCreature(attacker, move.power);
+			addOrRefreshStatus(attacker, 'ward', 2);
+			this.addLog(state, `${attackerLabel} used Shell Brace: ${healed} HP restored${cleared ? ', Stagger cleared' : ''}, Ward raised.`);
+			return;
+		}
+
+		if (move.id === 'phase-feint') {
+			addOrRefreshStatus(attacker, 'evasion', 2);
+			this.addLog(state, `${attackerLabel} used Phase Feint and became harder to hit.`);
+			return;
+		}
+
+		if (move.id === 'panel-shift') {
+			const clearedDisruption = removeStatus(attacker, 'disruption');
+			const clearedEcho = removeStatus(attacker, 'echo-interference');
+			const before = attacker.energy;
+			attacker.energy = Math.min(attacker.maxEnergy, attacker.energy + move.power);
+			const restored = attacker.energy - before;
+			this.addLog(state, `${attackerLabel} used Panel Shift: ${restored} Energy restored${clearedDisruption || clearedEcho ? ', noise cleared' : ''}.`);
+			return;
+		}
+
+		let damage = move.power;
+
+		if (move.id === 'pursuit-bite' && defender.hp <= Math.ceil(defender.maxHp * 0.35)) {
+			damage += 10;
+		}
+
+		if (move.id === 'bog-leech' && hasStatus(defender, 'corrosion')) {
+			damage += 6;
+		}
+
+		if (move.id === 'chorus-echo' && (hasStatus(defender, 'echo-interference') || hasStatus(defender, 'burn'))) {
+			damage += 8;
+		}
+
+		if (move.id === 'ember-spire' && hasStatus(defender, 'burn')) {
+			damage += 10;
+		}
+
+		const dealt = damageCreature(defender, damage);
+		this.addLog(state, `${attackerLabel} used ${move.name} for ${dealt} damage.`);
+
+		if (move.id === 'signal-snare') {
+			addOrRefreshStatus(defender, 'disruption', 3);
+			this.addLog(state, `${defenderLabel} is Disrupted. Move costs are increased.`);
+		}
+
+		if (move.id === 'bog-leech') {
+			const healed = healCreature(attacker, Math.max(1, Math.ceil(dealt / (hasStatus(defender, 'corrosion') ? 2 : 3))));
+			if (healed > 0) this.addLog(state, `${attackerLabel} drained ${healed} HP.`);
+		}
+
+		if (move.id === 'reckless-rush') {
+			const recoil = Math.max(1, Math.ceil(dealt * 0.25));
+			attacker.hp = Math.max(1, attacker.hp - recoil);
+			this.addLog(state, `${attackerLabel} took ${recoil} recoil damage.`);
+		}
+
+		if (move.id === 'veil-snare') {
+			addOrRefreshStatus(defender, 'echo-interference', 3, true);
+			const stacks = getStatus(defender, 'echo-interference')?.stacks ?? 1;
+			this.addLog(state, `${defenderLabel} has Echo Interference x${stacks}.`);
+		}
+	}
+
+	private applyEndOfTurn(state: BattleState, playerWhoActed: PlayerNumber) {
+		for (let index = 0; index < state.players.length; index++) {
+			const creature = state.players[index];
+			const label = `Player ${index + 1}`;
+
+			if (hasStatus(creature, 'burn') && creature.hp > 0) {
+				const burnDamage = Math.min(BURN_DAMAGE, Math.max(0, creature.hp - 1));
+				creature.hp -= burnDamage;
+				if (burnDamage > 0) this.addLog(state, `${label} took ${burnDamage} Burn damage.`);
+			}
+
+			for (const status of creature.statuses) {
+				status.turns -= 1;
+			}
+
+			creature.statuses = creature.statuses.filter((status) => status.turns > 0);
+		}
+
+		const opponent: PlayerNumber = playerWhoActed === 1 ? 2 : 1;
+		const next = state.players[opponent - 1];
+		next.energy = Math.min(next.maxEnergy, next.energy + ENERGY_RECOVERY_PER_TURN);
+	}
+
 	private async handleMove(socket: WebSocket, player: PlayerNumber, rawMoveId?: string) {
 		if (!this.bothPlayersConnected()) {
-			this.send(socket, {
-				type: 'error',
-				message: 'Waiting for another player.',
-			});
+			this.send(socket, { type: 'error', message: 'Waiting for another player.' });
 			return;
 		}
 
 		const state = await this.getState();
 
 		if (state.winner !== null) {
-			this.send(socket, {
-				type: 'error',
-				message: 'This battle is already over.',
-			});
+			this.send(socket, { type: 'error', message: 'This battle is already over.' });
 			return;
 		}
 
 		if (!state.started || !state.ready[0] || !state.ready[1]) {
-			this.send(socket, {
-				type: 'error',
-				message: 'Both players must be ready before battling.',
-			});
+			this.send(socket, { type: 'error', message: 'Both players must be ready before battling.' });
 			return;
 		}
 
 		if (state.turn !== player) {
-			this.send(socket, {
-				type: 'error',
-				message: 'It is not your turn.',
-			});
+			this.send(socket, { type: 'error', message: 'It is not your turn.' });
 			return;
 		}
 
 		if (!rawMoveId || !(rawMoveId in MOVE_LIBRARY)) {
-			this.send(socket, {
-				type: 'error',
-				message: 'Unknown move.',
-			});
+			this.send(socket, { type: 'error', message: 'Unknown move.' });
 			return;
 		}
 
 		const moveId = rawMoveId as MoveId;
-		const attacker = state.players[player - 1];
-
-		if (!attacker.moves.includes(moveId)) {
-			this.send(socket, {
-				type: 'error',
-				message: 'That creature does not know this move.',
-			});
-			return;
-		}
-
 		const move = MOVE_LIBRARY[moveId];
-
-		if (attacker.energy < move.energyCost) {
-			this.send(socket, {
-				type: 'error',
-				message: 'Not enough energy for that move.',
-			});
-			return;
-		}
-
+		const attacker = state.players[player - 1];
 		const opponent: PlayerNumber = player === 1 ? 2 : 1;
 		const defender = state.players[opponent - 1];
 
-		attacker.energy -= move.energyCost;
-		defender.hp = Math.max(0, defender.hp - move.damage);
+		if (!attacker.moves.includes(moveId)) {
+			this.send(socket, { type: 'error', message: 'That creature does not know this move.' });
+			return;
+		}
 
-		this.addLog(state, `Player ${player} used ${move.name} for ${move.damage} damage.`);
+		const cost = effectiveEnergyCost(attacker, move);
+		if (attacker.energy < cost) {
+			this.send(socket, { type: 'error', message: `Not enough energy. ${move.name} currently costs ${cost}.` });
+			return;
+		}
 
-		if (defender.hp === 0) {
+		attacker.energy -= cost;
+
+		const accuracy = effectiveAccuracy(attacker, defender, move);
+		const hit = move.accuracy >= 100 || randomPercent() < accuracy;
+
+		if (!hit) {
+			this.addLog(state, `Player ${player} used ${move.name}, but it missed.`);
+		} else {
+			this.resolveMoveEffect(state, player, move);
+		}
+
+		if (hasStatus(defender, 'evasion')) {
+			removeStatus(defender, 'evasion');
+		}
+
+		attacker.lastMoveId = moveId;
+		this.applyEndOfTurn(state, player);
+
+		if (defender.hp <= 0) {
 			state.winner = player;
 			state.turn = null;
 			this.addLog(state, `Player ${player} wins.`);
+		} else if (attacker.hp <= 0) {
+			state.winner = opponent;
+			state.turn = null;
+			this.addLog(state, `Player ${opponent} wins.`);
 		} else {
-			defender.energy = Math.min(defender.maxEnergy, defender.energy + ENERGY_RECOVERY_PER_TURN);
 			state.turn = opponent;
 		}
 
@@ -282,22 +655,14 @@ export class BattleRoom extends DurableObject<Env> {
 
 	async fetch(request: Request): Promise<Response> {
 		if (request.headers.get('Upgrade') !== 'websocket') {
-			return new Response('Expected WebSocket', {
-				status: 426,
-			});
+			return new Response('Expected WebSocket', { status: 426 });
 		}
 
 		const existingSockets = this.ctx.getWebSockets();
-
-		if (existingSockets.length >= 2) {
-			return new Response('Battle room is full', {
-				status: 409,
-			});
-		}
+		if (existingSockets.length >= 2) return new Response('Battle room is full', { status: 409 });
 
 		const connectedPlayers = this.getConnectedPlayers();
 		const player: PlayerNumber = connectedPlayers.includes(1) ? 2 : 1;
-
 		const pair = new WebSocketPair();
 		const [client, server] = Object.values(pair);
 
@@ -314,33 +679,20 @@ export class BattleRoom extends DurableObject<Env> {
 		});
 
 		await this.broadcastState(state);
-
-		return new Response(null, {
-			status: 101,
-			webSocket: client,
-		});
+		return new Response(null, { status: 101, webSocket: client });
 	}
 
 	async webSocketMessage(socket: WebSocket, message: ArrayBuffer | string) {
-		if (typeof message !== 'string') {
-			return;
-		}
+		if (typeof message !== 'string') return;
 
 		const attachment = socket.deserializeAttachment() as SocketAttachment | null;
-
-		if (!attachment?.player) {
-			return;
-		}
+		if (!attachment?.player) return;
 
 		let data: ClientMessage;
-
 		try {
 			data = JSON.parse(message) as ClientMessage;
 		} catch {
-			this.send(socket, {
-				type: 'error',
-				message: 'Invalid message.',
-			});
+			this.send(socket, { type: 'error', message: 'Invalid message.' });
 			return;
 		}
 
@@ -349,9 +701,7 @@ export class BattleRoom extends DurableObject<Env> {
 			return;
 		}
 
-		if (data.type === 'move') {
-			await this.handleMove(socket, attachment.player, data.moveId);
-		}
+		if (data.type === 'move') await this.handleMove(socket, attachment.player, data.moveId);
 	}
 
 	async webSocketClose(socket: WebSocket, _code: number, _reason: string, _wasClean: boolean) {
@@ -375,13 +725,8 @@ function generateRoomCode(): string {
 	const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 	const bytes = new Uint8Array(6);
 	crypto.getRandomValues(bytes);
-
 	let code = '';
-
-	for (const byte of bytes) {
-		code += alphabet[byte % alphabet.length];
-	}
-
+	for (const byte of bytes) code += alphabet[byte % alphabet.length];
 	return code;
 }
 
@@ -390,26 +735,15 @@ export default {
 		const url = new URL(request.url);
 
 		if (request.method === 'POST' && url.pathname === '/api/rooms') {
-			return Response.json({
-				code: generateRoomCode(),
-			});
+			return Response.json({ code: generateRoomCode() });
 		}
 
 		const match = url.pathname.match(/^\/api\/rooms\/([A-Z2-9]{6})\/ws$/);
-
 		if (match) {
-			const roomCode = match[1];
-			const room = env.BATTLE_ROOM.getByName(roomCode);
+			const room = env.BATTLE_ROOM.getByName(match[1]);
 			return room.fetch(request);
 		}
 
-		return Response.json(
-			{
-				error: 'Not found',
-			},
-			{
-				status: 404,
-			},
-		);
+		return Response.json({ error: 'Not found' }, { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;

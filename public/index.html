@@ -4,12 +4,10 @@
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<title>Demonym Connect</title>
-
 		<style>
 			* {
 				box-sizing: border-box;
 			}
-
 			body {
 				margin: 0;
 				min-height: 100vh;
@@ -20,150 +18,136 @@
 				align-items: center;
 				justify-content: center;
 			}
-
 			main {
-				width: min(760px, calc(100% - 32px));
+				width: min(860px, calc(100% - 32px));
 				padding: 24px 0;
 			}
-
 			h1,
 			h2,
 			p {
 				margin-top: 0;
 			}
-
 			button,
 			input {
 				font: inherit;
 				padding: 10px 14px;
 			}
-
 			button {
 				cursor: pointer;
 			}
-
 			button:disabled {
 				cursor: not-allowed;
 				opacity: 0.45;
 			}
-
 			.lobby {
 				display: grid;
 				gap: 16px;
 			}
-
 			.join {
 				display: flex;
 				gap: 8px;
 			}
-
 			.join input {
 				flex: 1;
 				text-transform: uppercase;
 			}
-
 			#battle {
 				display: none;
 			}
-
 			.room,
 			#player-label {
 				margin-bottom: 12px;
 				opacity: 0.75;
 			}
-
 			.creatures {
 				display: grid;
 				grid-template-columns: 1fr 1fr;
 				gap: 16px;
 				margin: 24px 0;
 			}
-
 			.creature {
 				border: 1px solid #666;
 				padding: 18px;
 			}
-
 			.creature.you {
 				border-color: #fff;
 			}
-
 			.creature.active {
 				outline: 2px solid #fff;
 				outline-offset: 3px;
 			}
-
 			.creature-name {
 				font-size: 1.1rem;
 				margin: 10px 0 4px;
 			}
-
 			.stat {
 				margin-top: 8px;
 			}
-
+			.status-list {
+				min-height: 18px;
+				margin-top: 8px;
+				opacity: 0.8;
+				font-size: 0.86rem;
+			}
 			.ready-state {
 				margin-top: 12px;
 				opacity: 0.75;
 			}
-
 			#signal-toss {
 				min-height: 24px;
 				margin: 16px 0 6px;
 				letter-spacing: 0.04em;
 				opacity: 0.8;
 			}
-
 			#status {
 				min-height: 24px;
 				margin: 16px 0;
 				font-weight: bold;
 			}
-
 			#ready {
 				width: 100%;
 				margin-bottom: 12px;
 				font-weight: bold;
 			}
-
 			#moves {
 				display: grid;
 				grid-template-columns: repeat(2, minmax(0, 1fr));
 				gap: 10px;
 			}
-
 			.move {
 				text-align: left;
-				min-height: 72px;
+				min-height: 96px;
 			}
-
 			.move strong,
 			.move small {
 				display: block;
 			}
-
 			.move small {
 				margin-top: 4px;
 				opacity: 0.75;
 			}
-
+			.move .pressure {
+				opacity: 1;
+			}
 			.log {
 				margin-top: 24px;
 				border-top: 1px solid #444;
 				padding-top: 16px;
 			}
-
 			#battle-log {
 				margin: 0;
 				padding-left: 20px;
-				max-height: 190px;
+				max-height: 230px;
 				overflow: auto;
 			}
-
 			#battle-log li {
 				margin-bottom: 6px;
 			}
-
+			.note {
+				margin-top: 18px;
+				opacity: 0.55;
+				font-size: 0.8rem;
+			}
 			@media (max-width: 600px) {
 				.creatures,
 				#moves {
@@ -172,15 +156,12 @@
 			}
 		</style>
 	</head>
-
 	<body>
 		<main>
 			<section id="lobby">
 				<h1>DEMONYM CONNECT</h1>
-
 				<div class="lobby">
 					<button id="create">Create Battle</button>
-
 					<div class="join">
 						<input id="room-code" type="text" maxlength="6" placeholder="Battle Code" autocomplete="off" />
 						<button id="join">Join Battle</button>
@@ -190,30 +171,27 @@
 
 			<section id="battle">
 				<h1>DEMONYM CONNECT</h1>
-
-				<div class="room">
-					Battle Code:
-					<strong id="current-room"></strong>
-				</div>
-
+				<div class="room">Battle Code: <strong id="current-room"></strong></div>
 				<div id="player-label">Connecting...</div>
 
 				<div class="creatures">
 					<div id="player-1" class="creature">
 						<strong>PLAYER 1</strong>
-						<div id="name-1" class="creature-name">Test Creature 1</div>
+						<div id="name-1" class="creature-name">Test Husk</div>
 						<div>Lineage: <span id="lineage-1">Husk</span></div>
 						<div class="stat">HP: <span id="hp-1">100</span>/<span id="max-hp-1">100</span></div>
-						<div class="stat">Energy: <span id="energy-1">6</span>/<span id="max-energy-1">10</span></div>
+						<div class="stat">Energy: <span id="energy-1">7</span>/<span id="max-energy-1">10</span></div>
+						<div class="status-list" id="statuses-1">No statuses</div>
 						<div class="ready-state" id="ready-1">Not ready</div>
 					</div>
 
 					<div id="player-2" class="creature">
 						<strong>PLAYER 2</strong>
-						<div id="name-2" class="creature-name">Test Creature 2</div>
+						<div id="name-2" class="creature-name">Test Wisp</div>
 						<div>Lineage: <span id="lineage-2">Wisp</span></div>
 						<div class="stat">HP: <span id="hp-2">100</span>/<span id="max-hp-2">100</span></div>
-						<div class="stat">Energy: <span id="energy-2">6</span>/<span id="max-energy-2">10</span></div>
+						<div class="stat">Energy: <span id="energy-2">7</span>/<span id="max-energy-2">10</span></div>
+						<div class="status-list" id="statuses-2">No statuses</div>
 						<div class="ready-state" id="ready-2">Not ready</div>
 					</div>
 				</div>
@@ -226,6 +204,11 @@
 				<div class="log">
 					<h2>BATTLE LOG</h2>
 					<ol id="battle-log"></ol>
+				</div>
+
+				<div class="note">
+					v0.2.2 moveset test build. Move behavior is being aligned to the Cardputer BattleEngine; exact balance values are still test
+					values.
 				</div>
 			</section>
 		</main>
@@ -252,6 +235,16 @@
 			let state = null;
 			let moveLibrary = {};
 
+			const statusNames = {
+				stagger: 'Stagger',
+				disruption: 'Disruption',
+				burn: 'Burn',
+				corrosion: 'Corrosion',
+				'echo-interference': 'Echo Interference',
+				evasion: 'Evasion',
+				ward: 'Ward',
+			};
+
 			function showBattle(code) {
 				lobby.style.display = 'none';
 				battle.style.display = 'block';
@@ -263,30 +256,23 @@
 			}
 
 			function sendMessage(message) {
-				if (!socket || socket.readyState !== WebSocket.OPEN) {
-					return;
-				}
-
-				socket.send(JSON.stringify(message));
+				if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 			}
 
 			function connectToRoom(code) {
 				code = code.trim().toUpperCase();
-
 				if (!/^[A-Z2-9]{6}$/.test(code)) {
 					alert('Enter a valid 6-character battle code.');
 					return;
 				}
 
 				showBattle(code);
-
 				const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
 				socket = new WebSocket(`${protocol}://${location.host}/api/rooms/${code}/ws`);
 
 				socket.addEventListener('open', () => {
 					status.textContent = 'Connected.';
 				});
-
 				socket.addEventListener('message', (event) => {
 					const message = JSON.parse(event.data);
 
@@ -295,7 +281,6 @@
 						state = message.state;
 						connectedPlayers = message.connectedPlayers ?? [];
 						moveLibrary = message.moveLibrary ?? {};
-
 						playerLabel.textContent = `You are Player ${playerNumber}`;
 						player1Card.classList.toggle('you', playerNumber === 1);
 						player2Card.classList.toggle('you', playerNumber === 2);
@@ -311,9 +296,7 @@
 						return;
 					}
 
-					if (message.type === 'error') {
-						status.textContent = message.message;
-					}
+					if (message.type === 'error') status.textContent = message.message;
 				});
 
 				socket.addEventListener('close', () => {
@@ -338,14 +321,24 @@
 				setText(`#energy-${player}`, creature.energy);
 				setText(`#max-energy-${player}`, creature.maxEnergy);
 				setText(`#ready-${player}`, state.ready[player - 1] ? 'Ready' : 'Not ready');
+
+				const statuses = creature.statuses ?? [];
+				setText(
+					`#statuses-${player}`,
+					statuses.length
+						? statuses.map((item) => `${statusNames[item.id] ?? item.id}${(item.stacks ?? 1) > 1 ? ` x${item.stacks}` : ''}`).join(' · ')
+						: 'No statuses',
+				);
+			}
+
+			function currentMoveCost(creature, move) {
+				const disrupted = (creature.statuses ?? []).some((item) => item.id === 'disruption');
+				return move.energyCost + (disrupted ? 2 : 0);
 			}
 
 			function renderMoves() {
 				movesContainer.innerHTML = '';
-
-				if (!playerNumber || !state) {
-					return;
-				}
+				if (!playerNumber || !state) return;
 
 				const creature = state.players[playerNumber - 1];
 				const canAct =
@@ -357,43 +350,30 @@
 
 				for (const moveId of creature.moves) {
 					const move = moveLibrary[moveId];
+					if (!move) continue;
 
-					if (!move) {
-						continue;
-					}
-
+					const cost = currentMoveCost(creature, move);
 					const button = document.createElement('button');
 					button.className = 'move';
-					button.disabled = !canAct || creature.energy < move.energyCost;
-					button.innerHTML = `<strong>${move.name}</strong><small>${move.damage} DMG · ${move.energyCost} EN</small><small>${move.description}</small>`;
-					button.addEventListener('click', () => {
-						sendMessage({
-							type: 'move',
-							moveId: move.id,
-						});
-					});
-
+					button.disabled = !canAct || creature.energy < cost;
+					button.innerHTML = `<strong>${move.name}</strong><small class="pressure">${move.pressure.toUpperCase()} · ${move.accuracy}% · ${cost} EN</small><small>${move.description}</small>`;
+					button.addEventListener('click', () => sendMessage({ type: 'move', moveId: move.id }));
 					movesContainer.append(button);
 				}
 			}
 
 			function renderLog() {
 				battleLog.innerHTML = '';
-
 				for (const entry of state.log) {
 					const item = document.createElement('li');
 					item.textContent = entry;
 					battleLog.append(item);
 				}
-
 				battleLog.scrollTop = battleLog.scrollHeight;
 			}
 
 			function render() {
-				if (!state || !playerNumber) {
-					return;
-				}
-
+				if (!state || !playerNumber) return;
 				renderCreature(1);
 				renderCreature(2);
 
@@ -402,15 +382,9 @@
 
 				const bothConnected = connectedPlayers.includes(1) && connectedPlayers.includes(2);
 				const playerReady = state.ready[playerNumber - 1];
-
-				if (state.started && state.initiativeWinner) {
-					signalToss.textContent = `SIGNAL TOSS: Player ${state.initiativeWinner} moves first.`;
-				} else {
-					signalToss.textContent = '';
-				}
-
+				signalToss.textContent =
+					state.started && state.initiativeWinner ? `SIGNAL TOSS: Player ${state.initiativeWinner} moves first.` : '';
 				readyButton.disabled = !bothConnected || playerReady || state.winner !== null;
-				readyButton.textContent = playerReady ? 'READY' : 'READY';
 
 				if (state.winner !== null) {
 					status.textContent = state.winner === playerNumber ? 'You win.' : `Player ${state.winner} wins.`;
@@ -430,11 +404,8 @@
 
 			createButton.addEventListener('click', async () => {
 				createButton.disabled = true;
-
 				try {
-					const response = await fetch('/api/rooms', {
-						method: 'POST',
-					});
+					const response = await fetch('/api/rooms', { method: 'POST' });
 					const data = await response.json();
 					connectToRoom(data.code);
 				} finally {
@@ -442,19 +413,11 @@
 				}
 			});
 
-			joinButton.addEventListener('click', () => {
-				connectToRoom(roomInput.value);
-			});
-
+			joinButton.addEventListener('click', () => connectToRoom(roomInput.value));
 			roomInput.addEventListener('keydown', (event) => {
-				if (event.key === 'Enter') {
-					connectToRoom(roomInput.value);
-				}
+				if (event.key === 'Enter') connectToRoom(roomInput.value);
 			});
-
-			readyButton.addEventListener('click', () => {
-				sendMessage({ type: 'ready' });
-			});
+			readyButton.addEventListener('click', () => sendMessage({ type: 'ready' }));
 		</script>
 	</body>
 </html>
