@@ -118,3 +118,99 @@ This is deliberately **not** live Cardputer transport. The browser's `DEVICE PAY
 Rematches preserve the exact accepted creature payload, including a mock Cardputer payload. Choosing a lineage or using the `USE WEB PRESET` action replaces it with a normal server-generated `web-test` payload.
 
 The browser also shows the current creature source as `WEB TEST` or `CARDPUTER MOCK` so protocol tests are easy to verify from both clients.
+
+## v0.2.9 connection handshake
+
+v0.2.9 adds an explicit client handshake before a socket is considered connected to the battle room. This is the first transport step intended to map directly to a future Cardputer implementation.
+
+A newly accepted WebSocket is assigned a provisional player slot, but it is **not** included in `connectedPlayers` and cannot send battle commands until the handshake succeeds.
+
+The server first sends:
+
+```json
+{
+  "type": "hello-required",
+  "player": 1,
+  "connectionProtocol": {
+    "name": "demonym-connect",
+    "version": 1,
+    "serverVersion": "0.2.9",
+    "requiredCapabilities": [
+      "creature-payload-v1",
+      "round-lock-v1",
+      "battle-events-v1",
+      "recover-action-v1"
+    ],
+    "supportedClientTypes": ["web", "cardputer"]
+  }
+}
+```
+
+The client must answer with `client-hello`:
+
+```json
+{
+  "type": "client-hello",
+  "protocol": "demonym-connect",
+  "protocolVersion": 1,
+  "clientType": "cardputer",
+  "clientVersion": "0.9.x",
+  "capabilities": [
+    "creature-payload-v1",
+    "round-lock-v1",
+    "battle-events-v1",
+    "recover-action-v1",
+    "rematch-v1"
+  ]
+}
+```
+
+A compatible client receives:
+
+```json
+{
+  "type": "hello-ack",
+  "player": 1,
+  "client": {
+    "clientType": "cardputer",
+    "clientVersion": "0.9.x",
+    "capabilities": ["..."]
+  },
+  "connectionProtocol": { "...": "..." }
+}
+```
+
+The normal `welcome` state follows the acknowledgement. An incompatible protocol version, unsupported client type, malformed capability list, or missing required capability receives `hello-reject` and the server closes that socket.
+
+The handshake is a **compatibility negotiation, not authentication**. A client identifying itself as `cardputer` is not yet cryptographically verified as a physical device. Device identity/authentication is outside the current v1 scope.
+
+### Current capabilities
+
+- `creature-payload-v1` — understands the static creature payload contract.
+- `round-lock-v1` — understands simultaneous hidden move selection followed by ordered round resolution.
+- `battle-events-v1` — can consume the current public server event stream.
+- `recover-action-v1` — understands the permanent Recover battle action.
+- `rematch-v1` — understands the current rematch flow. This is advertised by the web/mock clients but is not currently required for admission.
+
+### Cardputer payload gating
+
+Starting in v0.2.9, `import-creature` with `source: "cardputer"` is accepted only from a socket whose successful handshake used `clientType: "cardputer"`.
+
+The browser includes a **Cardputer Mock** lobby mode so this can be tested without firmware changes. Cardputer Mock uses the normal browser battle UI, but performs a Cardputer-type handshake and is therefore allowed to exercise the device creature handoff path.
+
+A normal `web` client may still use server-generated web lineage presets but cannot submit a Cardputer creature payload.
+
+### Connected client metadata
+
+State messages now include `connectedClients` alongside `connectedPlayers`. Each item exposes only compatibility metadata needed by the UI:
+
+```json
+{
+  "player": 1,
+  "clientType": "cardputer",
+  "clientVersion": "browser-mock-0.2.9",
+  "capabilities": ["..."]
+}
+```
+
+This metadata is connection state, not creature state. A Cardputer client can theoretically battle using a server test creature, and a creature payload's `source` remains separate from the type of client connected to that player slot.

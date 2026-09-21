@@ -8,6 +8,14 @@ type BattlePhase = 'waiting' | 'selecting' | 'finished';
 type StatusId = 'stagger' | 'disruption' | 'burn' | 'corrosion' | 'echo-interference' | 'evasion' | 'ward';
 type BattleEventType = 'lineage_selected' | 'creature_imported' | 'ready' | 'signal_toss' | 'round_start' | 'action_locked' | 'move_resolved' | 'move_missed' | 'recover' | 'status_applied' | 'heal' | 'battle_end' | 'rematch_requested' | 'rematch_started' | 'disconnect';
 type CreaturePayloadSource = 'web-test' | 'cardputer';
+type ClientType = 'web' | 'cardputer';
+
+type ClientCapability =
+	| 'creature-payload-v1'
+	| 'round-lock-v1'
+	| 'battle-events-v1'
+	| 'recover-action-v1'
+	| 'rematch-v1';
 
 type MoveId =
 	| 'pulse-strike'
@@ -79,7 +87,7 @@ interface BattleEvent {
 }
 
 interface BattleState {
-	version: 10;
+	version: 11;
 	players: [CreatureState, CreatureState];
 	ready: [boolean, boolean];
 	started: boolean;
@@ -97,8 +105,16 @@ interface BattleState {
 	events: BattleEvent[];
 }
 
+interface ClientInfo {
+	clientType: ClientType;
+	clientVersion: string;
+	capabilities: ClientCapability[];
+}
+
 interface SocketAttachment {
 	player: PlayerNumber;
+	handshakeComplete: boolean;
+	clientInfo?: ClientInfo;
 }
 
 interface ClientMessage {
@@ -106,6 +122,11 @@ interface ClientMessage {
 	moveId?: string;
 	lineage?: string;
 	creature?: unknown;
+	protocol?: string;
+	protocolVersion?: number;
+	clientType?: string;
+	clientVersion?: string;
+	capabilities?: unknown;
 }
 
 interface LineageDefinition {
@@ -322,12 +343,28 @@ const BATTLE_CONFIG = {
 	energyRecoveryPerRound: ENERGY_RECOVERY_PER_ROUND,
 };
 
+const REQUIRED_CLIENT_CAPABILITIES: ClientCapability[] = [
+	'creature-payload-v1',
+	'round-lock-v1',
+	'battle-events-v1',
+	'recover-action-v1',
+];
+
+const CONNECTION_PROTOCOL = {
+	name: 'demonym-connect',
+	version: 1,
+	serverVersion: '0.2.9',
+	requiredCapabilities: REQUIRED_CLIENT_CAPABILITIES,
+	supportedClientTypes: ['web', 'cardputer'] as ClientType[],
+};
+
 const BATTLE_PROTOCOL = {
 	version: 1,
 	creaturePayloadFormat: 'demonym-battle-creature',
 	creaturePayloadVersion: 1,
 	battleEventVersion: 1,
 	externalCreatureImport: true,
+	connectionProtocol: CONNECTION_PROTOCOL,
 };
 
 function createWebTestPayload(lineage: Lineage): BattleCreaturePayload {
@@ -429,7 +466,7 @@ function randomPercent(): number {
 
 function createInitialState(): BattleState {
 	return {
-		version: 10,
+		version: 11,
 		players: [createCreature(1), createCreature(2)],
 		ready: [false, false],
 		started: false,
@@ -537,7 +574,7 @@ export class BattleRoom extends DurableObject<Env> {
 	private async getState(): Promise<BattleState> {
 		const storedState = await this.ctx.storage.get<BattleState | { version?: number }>('state');
 
-		if (!storedState || storedState.version !== 10) {
+		if (!storedState || storedState.version !== 11) {
 			const state = createInitialState();
 			await this.ctx.storage.put('state', state);
 			return state;
@@ -546,7 +583,7 @@ export class BattleRoom extends DurableObject<Env> {
 		return storedState as BattleState;
 	}
 
-	private getConnectedPlayers(): PlayerNumber[] {
+	private getReservedPlayers(): PlayerNumber[] {
 		const players = new Set<PlayerNumber>();
 
 		for (const socket of this.ctx.getWebSockets()) {
@@ -555,6 +592,25 @@ export class BattleRoom extends DurableObject<Env> {
 		}
 
 		return [...players].sort() as PlayerNumber[];
+	}
+
+	private getConnectedPlayers(): PlayerNumber[] {
+		const players = new Set<PlayerNumber>();
+
+		for (const socket of this.ctx.getWebSockets()) {
+			const attachment = socket.deserializeAttachment() as SocketAttachment | null;
+			if (attachment?.player && attachment.handshakeComplete) players.add(attachment.player);
+		}
+
+		return [...players].sort() as PlayerNumber[];
+	}
+
+	private getConnectedClients() {
+		return this.ctx.getWebSockets()
+			.map((socket) => socket.deserializeAttachment() as SocketAttachment | null)
+			.filter((attachment): attachment is SocketAttachment => Boolean(attachment?.player && attachment.handshakeComplete && attachment.clientInfo))
+			.map((attachment) => ({ player: attachment.player, ...attachment.clientInfo }))
+			.sort((a, b) => a.player - b.player);
 	}
 
 	private send(socket: WebSocket, data: unknown) {
@@ -606,6 +662,7 @@ export class BattleRoom extends DurableObject<Env> {
 			...(type === 'welcome' ? { player } : {}),
 			state: this.stateForPlayer(state, player),
 			connectedPlayers: this.getConnectedPlayers(),
+			connectedClients: this.getConnectedClients(),
 			moveLibrary: MOVE_LIBRARY,
 			lineageLibrary: LINEAGE_LIBRARY,
 			battleConfig: BATTLE_CONFIG,
@@ -618,7 +675,7 @@ export class BattleRoom extends DurableObject<Env> {
 
 		for (const socket of this.ctx.getWebSockets()) {
 			const attachment = socket.deserializeAttachment() as SocketAttachment | null;
-			if (!attachment?.player) continue;
+			if (!attachment?.player || !attachment.handshakeComplete) continue;
 			this.sendState(socket, state, attachment.player);
 		}
 	}
@@ -641,6 +698,81 @@ export class BattleRoom extends DurableObject<Env> {
 		state.matchNumber += 1;
 		state.log = [`Match ${state.matchNumber} ready. Choose your lineage and press READY.`];
 		this.addEvent(state, { type: 'rematch_started', round: 0, message: `Match ${state.matchNumber} ready.` });
+	}
+
+
+	private parseClientHello(data: ClientMessage): { ok: true; info: ClientInfo } | { ok: false; error: string } {
+		if (data.protocol !== CONNECTION_PROTOCOL.name) {
+			return { ok: false, error: `Unsupported connection protocol. Expected ${CONNECTION_PROTOCOL.name}.` };
+		}
+
+		if (data.protocolVersion !== CONNECTION_PROTOCOL.version) {
+			return { ok: false, error: `Unsupported protocol version. Server requires v${CONNECTION_PROTOCOL.version}.` };
+		}
+
+		if (data.clientType !== 'web' && data.clientType !== 'cardputer') {
+			return { ok: false, error: 'clientType must be "web" or "cardputer".' };
+		}
+
+		const clientVersion = typeof data.clientVersion === 'string' ? data.clientVersion.trim() : '';
+		if (!clientVersion || clientVersion.length > 40) {
+			return { ok: false, error: 'clientVersion must be 1-40 characters.' };
+		}
+
+		if (!Array.isArray(data.capabilities) || !data.capabilities.every((item) => typeof item === 'string')) {
+			return { ok: false, error: 'capabilities must be an array of strings.' };
+		}
+
+		const capabilities = [...new Set(data.capabilities)] as ClientCapability[];
+		const missing = REQUIRED_CLIENT_CAPABILITIES.filter((capability) => !capabilities.includes(capability));
+		if (missing.length) {
+			return { ok: false, error: `Missing required capabilities: ${missing.join(', ')}.` };
+		}
+
+		return {
+			ok: true,
+			info: {
+				clientType: data.clientType,
+				clientVersion,
+				capabilities,
+			},
+		};
+	}
+
+	private async handleClientHello(socket: WebSocket, data: ClientMessage, attachment: SocketAttachment) {
+		if (attachment.handshakeComplete) {
+			this.send(socket, { type: 'error', message: 'Client handshake is already complete.' });
+			return;
+		}
+
+		const result = this.parseClientHello(data);
+		if (result.ok === false) {
+			this.send(socket, {
+				type: 'hello-reject',
+				message: result.error,
+				connectionProtocol: CONNECTION_PROTOCOL,
+			});
+			socket.close(1008, 'Handshake rejected');
+			return;
+		}
+
+		const updatedAttachment: SocketAttachment = {
+			player: attachment.player,
+			handshakeComplete: true,
+			clientInfo: result.info,
+		};
+		socket.serializeAttachment(updatedAttachment);
+
+		this.send(socket, {
+			type: 'hello-ack',
+			player: attachment.player,
+			client: result.info,
+			connectionProtocol: CONNECTION_PROTOCOL,
+		});
+
+		const state = await this.getState();
+		this.sendState(socket, state, attachment.player, 'welcome');
+		await this.broadcastState(state);
 	}
 
 	private async handleRematch(socket: WebSocket, player: PlayerNumber) {
@@ -731,6 +863,12 @@ export class BattleRoom extends DurableObject<Env> {
 	}
 
 	private async handleCreatureImport(socket: WebSocket, player: PlayerNumber, rawPayload: unknown) {
+		const attachment = socket.deserializeAttachment() as SocketAttachment | null;
+		if (attachment?.clientInfo?.clientType !== 'cardputer') {
+			this.send(socket, { type: 'error', message: 'Cardputer creature imports require a Cardputer client handshake.' });
+			return;
+		}
+
 		const state = await this.getState();
 
 		if (state.winner !== null) {
@@ -755,7 +893,7 @@ export class BattleRoom extends DurableObject<Env> {
 		}
 
 		state.players[player - 1] = createCreatureFromPayload(validation.payload);
-		this.addLog(state, `Player ${player} imported ${validation.payload.name} from a mock Cardputer payload.`);
+		this.addLog(state, `Player ${player} imported ${validation.payload.name} from a Cardputer payload.`);
 		this.addEvent(state, { type: 'creature_imported', player, message: `Player ${player} imported an external creature payload.` });
 		await this.saveAndBroadcast(state);
 	}
@@ -1061,18 +1199,20 @@ export class BattleRoom extends DurableObject<Env> {
 		const existingSockets = this.ctx.getWebSockets();
 		if (existingSockets.length >= 2) return new Response('Battle room is full', { status: 409 });
 
-		const connectedPlayers = this.getConnectedPlayers();
-		const player: PlayerNumber = connectedPlayers.includes(1) ? 2 : 1;
+		const reservedPlayers = this.getReservedPlayers();
+		const player: PlayerNumber = reservedPlayers.includes(1) ? 2 : 1;
 		const pair = new WebSocketPair();
 		const [client, server] = Object.values(pair);
 
 		this.ctx.acceptWebSocket(server);
-		server.serializeAttachment({ player } satisfies SocketAttachment);
+		server.serializeAttachment({ player, handshakeComplete: false } satisfies SocketAttachment);
 
-		const state = await this.getState();
-		this.sendState(server, state, player, 'welcome');
+		this.send(server, {
+			type: 'hello-required',
+			player,
+			connectionProtocol: CONNECTION_PROTOCOL,
+		});
 
-		await this.broadcastState(state);
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
@@ -1087,6 +1227,21 @@ export class BattleRoom extends DurableObject<Env> {
 			data = JSON.parse(message) as ClientMessage;
 		} catch {
 			this.send(socket, { type: 'error', message: 'Invalid message.' });
+			return;
+		}
+
+		if (!attachment.handshakeComplete) {
+			if (data.type === 'client-hello') {
+				await this.handleClientHello(socket, data, attachment);
+				return;
+			}
+
+			this.send(socket, { type: 'hello-reject', message: 'Client handshake required before battle messages.', connectionProtocol: CONNECTION_PROTOCOL });
+			return;
+		}
+
+		if (data.type === 'client-hello') {
+			this.send(socket, { type: 'error', message: 'Client handshake is already complete.' });
 			return;
 		}
 
@@ -1122,7 +1277,7 @@ export class BattleRoom extends DurableObject<Env> {
 		const attachment = socket.deserializeAttachment() as SocketAttachment | null;
 		const state = await this.getState();
 
-		if (attachment?.player && state.winner === null) {
+		if (attachment?.player && attachment.handshakeComplete && state.winner === null) {
 			state.ready[attachment.player - 1] = false;
 			state.started = false;
 			state.phase = 'waiting';

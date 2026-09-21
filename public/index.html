@@ -5,78 +5,427 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<title>Demonym Connect</title>
 		<style>
-			* { box-sizing: border-box; }
-			body { margin: 0; min-height: 100vh; background: #111; color: #fff; font-family: monospace; display: flex; align-items: center; justify-content: center; }
-			main { width: min(860px, calc(100% - 32px)); padding: 24px 0; }
-			h1, h2, p { margin-top: 0; }
-			button, input { font: inherit; padding: 10px 14px; }
-			button { cursor: pointer; }
-			button:disabled { cursor: not-allowed; opacity: 0.45; }
-			.lobby { display: grid; gap: 16px; }
-			.join { display: flex; gap: 8px; }
-			.join input { flex: 1; text-transform: uppercase; }
-			#battle { display: none; }
-			.room, #player-label { margin-bottom: 12px; opacity: 0.75; }
-			.creatures { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 24px 0; }
-			.creature { border: 1px solid #666; padding: 18px; }
-			.creature.you { border-color: #fff; }
-			.creature.active { outline: 2px solid #fff; outline-offset: 3px; }
-			.creature { transition: transform 120ms ease, border-color 120ms ease, background 120ms ease; }
-			.creature.event-act { animation: event-act 420ms ease; }
-			.creature.event-hit { animation: event-hit 420ms steps(2, end); }
-			.creature.event-lock { animation: event-lock 360ms ease; }
-			.creature.event-recover { animation: event-recover 520ms ease; }
-			.creature.event-status { animation: event-status 520ms ease; }
-			.creature.event-win { animation: event-win 800ms ease; }
-			.creature-name { font-size: 1.1rem; margin: 10px 0 4px; }
-			.stat { margin-top: 8px; }
-			.status-list { min-height: 18px; margin-top: 8px; opacity: 0.8; font-size: 0.86rem; }
-			.ready-state { margin-top: 12px; opacity: 0.75; }
-			#signal-toss { min-height: 24px; margin: 16px 0 6px; letter-spacing: 0.04em; opacity: 0.8; }
-			#battle-event { min-height: 42px; margin: 8px 0 12px; padding: 10px 12px; border: 1px solid #333; display: flex; align-items: center; font-weight: bold; letter-spacing: 0.06em; opacity: 0; transform: translateY(3px); transition: opacity 120ms ease, transform 120ms ease; }
-			#battle-event.show { opacity: 1; transform: translateY(0); }
-			#battle-event .event-prefix { opacity: 0.55; margin-right: 8px; }
-			.round-panel { display: none; grid-template-columns: 0.7fr 1fr 1.5fr; gap: 12px; margin: 12px 0 16px; padding: 12px 14px; border: 1px solid #444; }
-			.round-panel .label { display: block; margin-bottom: 4px; opacity: 0.55; font-size: 0.75rem; }
-			.round-panel strong { display: block; }
-			#status { min-height: 24px; margin: 16px 0; font-weight: bold; }
-			.result-panel { display: none; margin: 16px 0; padding: 16px; border: 1px solid #666; }
-			.result-panel h2 { margin-bottom: 8px; }
-			.result-actions { display: flex; gap: 10px; margin-top: 12px; }
-			.result-actions button { flex: 1; }
-			#rematch-state { margin-top: 10px; opacity: 0.7; font-size: 0.85rem; }
-			.lineage-picker { margin: 18px 0 12px; padding: 14px; border: 1px solid #444; }
-			.lineage-picker label, .lineage-picker small { display: block; }
-			.lineage-picker label { margin-bottom: 8px; font-weight: bold; }
-			.lineage-picker select { width: 100%; padding: 10px 12px; font: inherit; background: #181818; color: #fff; border: 1px solid #666; }
-			.lineage-picker small { margin-top: 7px; opacity: 0.6; }
-			.source-line { margin-top: 9px; font-size: 0.82rem; opacity: 0.72; }
-			.payload-lab { margin: 0 0 14px; padding: 12px 14px; border: 1px dashed #444; }
-			.payload-lab summary { cursor: pointer; font-weight: bold; }
-			.payload-lab p { margin: 10px 0; opacity: 0.7; font-size: 0.82rem; }
-			.payload-lab textarea { width: 100%; min-height: 190px; resize: vertical; padding: 10px; border: 1px solid #555; background: #0b0b0b; color: #fff; font: inherit; line-height: 1.35; }
-			.payload-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
-			#payload-status { min-height: 18px; margin-top: 8px; opacity: 0.72; font-size: 0.82rem; }
-			#ready { width: 100%; margin-bottom: 12px; font-weight: bold; }
-			#moves { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-			.move { text-align: left; min-height: 96px; }
-			.move strong, .move small { display: block; }
-			.move small { margin-top: 4px; opacity: 0.75; }
-			.move .pressure { opacity: 1; }
-			.move.locked { outline: 2px solid #fff; outline-offset: -4px; }
-			.move.recover { grid-column: 1 / -1; border-style: dashed; }
-			.log { margin-top: 24px; border-top: 1px solid #444; padding-top: 16px; }
-			#battle-log { margin: 0; padding-left: 20px; max-height: 230px; overflow: auto; }
-			#battle-log li { margin-bottom: 6px; }
-			.note { margin-top: 18px; opacity: 0.55; font-size: 0.8rem; }
-			@keyframes event-act { 0% { transform: translateX(0); } 45% { transform: translateX(5px); border-color: #fff; } 100% { transform: translateX(0); } }
-			@keyframes event-hit { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-5px); background: #2a1717; } 50% { transform: translateX(5px); } 75% { transform: translateX(-3px); background: #111; } }
-			@keyframes event-lock { 0%, 100% { outline: 0 solid #fff; } 50% { outline: 3px solid #fff; outline-offset: -6px; } }
-			@keyframes event-recover { 0%, 100% { background: #111; } 50% { background: #17241d; border-color: #ddd; } }
-			@keyframes event-status { 0%, 100% { border-style: solid; } 35%, 70% { border-style: dashed; border-color: #fff; } }
-			@keyframes event-win { 0%, 100% { transform: scale(1); } 35% { transform: scale(1.015); outline: 3px double #fff; outline-offset: 4px; } }
-			@media (prefers-reduced-motion: reduce) { .creature, #battle-event { animation: none !important; transition: none !important; } }
-			@media (max-width: 600px) { .creatures, #moves, .round-panel, .payload-actions { grid-template-columns: 1fr; } }
+			* {
+				box-sizing: border-box;
+			}
+			body {
+				margin: 0;
+				min-height: 100vh;
+				background: #111;
+				color: #fff;
+				font-family: monospace;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+			}
+			main {
+				width: min(860px, calc(100% - 32px));
+				padding: 24px 0;
+			}
+			h1,
+			h2,
+			p {
+				margin-top: 0;
+			}
+			button,
+			input {
+				font: inherit;
+				padding: 10px 14px;
+			}
+			button {
+				cursor: pointer;
+			}
+			button:disabled {
+				cursor: not-allowed;
+				opacity: 0.45;
+			}
+			.lobby {
+				display: grid;
+				gap: 16px;
+			}
+			.join {
+				display: flex;
+				gap: 8px;
+			}
+			.join input {
+				flex: 1;
+				text-transform: uppercase;
+			}
+			.client-mode {
+				padding: 12px 14px;
+				border: 1px solid #444;
+			}
+			.client-mode label,
+			.client-mode small {
+				display: block;
+			}
+			.client-mode label {
+				margin-bottom: 8px;
+				font-weight: bold;
+			}
+			.client-mode select {
+				width: 100%;
+				padding: 10px 12px;
+				font: inherit;
+				background: #181818;
+				color: #fff;
+				border: 1px solid #666;
+			}
+			.client-mode small {
+				margin-top: 7px;
+				opacity: 0.6;
+			}
+			#battle {
+				display: none;
+			}
+			.room,
+			#player-label {
+				margin-bottom: 12px;
+				opacity: 0.75;
+			}
+			#connection-meta {
+				margin: -4px 0 12px;
+				padding: 8px 10px;
+				border: 1px solid #333;
+				opacity: 0.75;
+				font-size: 0.82rem;
+			}
+			.creatures {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 16px;
+				margin: 24px 0;
+			}
+			.creature {
+				border: 1px solid #666;
+				padding: 18px;
+			}
+			.creature.you {
+				border-color: #fff;
+			}
+			.creature.active {
+				outline: 2px solid #fff;
+				outline-offset: 3px;
+			}
+			.creature {
+				transition:
+					transform 120ms ease,
+					border-color 120ms ease,
+					background 120ms ease;
+			}
+			.creature.event-act {
+				animation: event-act 420ms ease;
+			}
+			.creature.event-hit {
+				animation: event-hit 420ms steps(2, end);
+			}
+			.creature.event-lock {
+				animation: event-lock 360ms ease;
+			}
+			.creature.event-recover {
+				animation: event-recover 520ms ease;
+			}
+			.creature.event-status {
+				animation: event-status 520ms ease;
+			}
+			.creature.event-win {
+				animation: event-win 800ms ease;
+			}
+			.creature-name {
+				font-size: 1.1rem;
+				margin: 10px 0 4px;
+			}
+			.stat {
+				margin-top: 8px;
+			}
+			.status-list {
+				min-height: 18px;
+				margin-top: 8px;
+				opacity: 0.8;
+				font-size: 0.86rem;
+			}
+			.ready-state {
+				margin-top: 12px;
+				opacity: 0.75;
+			}
+			#signal-toss {
+				min-height: 24px;
+				margin: 16px 0 6px;
+				letter-spacing: 0.04em;
+				opacity: 0.8;
+			}
+			#battle-event {
+				min-height: 42px;
+				margin: 8px 0 12px;
+				padding: 10px 12px;
+				border: 1px solid #333;
+				display: flex;
+				align-items: center;
+				font-weight: bold;
+				letter-spacing: 0.06em;
+				opacity: 0;
+				transform: translateY(3px);
+				transition:
+					opacity 120ms ease,
+					transform 120ms ease;
+			}
+			#battle-event.show {
+				opacity: 1;
+				transform: translateY(0);
+			}
+			#battle-event .event-prefix {
+				opacity: 0.55;
+				margin-right: 8px;
+			}
+			.round-panel {
+				display: none;
+				grid-template-columns: 0.7fr 1fr 1.5fr;
+				gap: 12px;
+				margin: 12px 0 16px;
+				padding: 12px 14px;
+				border: 1px solid #444;
+			}
+			.round-panel .label {
+				display: block;
+				margin-bottom: 4px;
+				opacity: 0.55;
+				font-size: 0.75rem;
+			}
+			.round-panel strong {
+				display: block;
+			}
+			#status {
+				min-height: 24px;
+				margin: 16px 0;
+				font-weight: bold;
+			}
+			.result-panel {
+				display: none;
+				margin: 16px 0;
+				padding: 16px;
+				border: 1px solid #666;
+			}
+			.result-panel h2 {
+				margin-bottom: 8px;
+			}
+			.result-actions {
+				display: flex;
+				gap: 10px;
+				margin-top: 12px;
+			}
+			.result-actions button {
+				flex: 1;
+			}
+			#rematch-state {
+				margin-top: 10px;
+				opacity: 0.7;
+				font-size: 0.85rem;
+			}
+			.lineage-picker {
+				margin: 18px 0 12px;
+				padding: 14px;
+				border: 1px solid #444;
+			}
+			.lineage-picker label,
+			.lineage-picker small {
+				display: block;
+			}
+			.lineage-picker label {
+				margin-bottom: 8px;
+				font-weight: bold;
+			}
+			.lineage-picker select {
+				width: 100%;
+				padding: 10px 12px;
+				font: inherit;
+				background: #181818;
+				color: #fff;
+				border: 1px solid #666;
+			}
+			.lineage-picker small {
+				margin-top: 7px;
+				opacity: 0.6;
+			}
+			.source-line {
+				margin-top: 9px;
+				font-size: 0.82rem;
+				opacity: 0.72;
+			}
+			.payload-lab {
+				margin: 0 0 14px;
+				padding: 12px 14px;
+				border: 1px dashed #444;
+			}
+			.payload-lab summary {
+				cursor: pointer;
+				font-weight: bold;
+			}
+			.payload-lab p {
+				margin: 10px 0;
+				opacity: 0.7;
+				font-size: 0.82rem;
+			}
+			.payload-lab textarea {
+				width: 100%;
+				min-height: 190px;
+				resize: vertical;
+				padding: 10px;
+				border: 1px solid #555;
+				background: #0b0b0b;
+				color: #fff;
+				font: inherit;
+				line-height: 1.35;
+			}
+			.payload-actions {
+				display: grid;
+				grid-template-columns: repeat(3, 1fr);
+				gap: 8px;
+				margin-top: 8px;
+			}
+			#payload-status {
+				min-height: 18px;
+				margin-top: 8px;
+				opacity: 0.72;
+				font-size: 0.82rem;
+			}
+			#ready {
+				width: 100%;
+				margin-bottom: 12px;
+				font-weight: bold;
+			}
+			#moves {
+				display: grid;
+				grid-template-columns: repeat(2, minmax(0, 1fr));
+				gap: 10px;
+			}
+			.move {
+				text-align: left;
+				min-height: 96px;
+			}
+			.move strong,
+			.move small {
+				display: block;
+			}
+			.move small {
+				margin-top: 4px;
+				opacity: 0.75;
+			}
+			.move .pressure {
+				opacity: 1;
+			}
+			.move.locked {
+				outline: 2px solid #fff;
+				outline-offset: -4px;
+			}
+			.move.recover {
+				grid-column: 1 / -1;
+				border-style: dashed;
+			}
+			.log {
+				margin-top: 24px;
+				border-top: 1px solid #444;
+				padding-top: 16px;
+			}
+			#battle-log {
+				margin: 0;
+				padding-left: 20px;
+				max-height: 230px;
+				overflow: auto;
+			}
+			#battle-log li {
+				margin-bottom: 6px;
+			}
+			.note {
+				margin-top: 18px;
+				opacity: 0.55;
+				font-size: 0.8rem;
+			}
+			@keyframes event-act {
+				0% {
+					transform: translateX(0);
+				}
+				45% {
+					transform: translateX(5px);
+					border-color: #fff;
+				}
+				100% {
+					transform: translateX(0);
+				}
+			}
+			@keyframes event-hit {
+				0%,
+				100% {
+					transform: translateX(0);
+				}
+				25% {
+					transform: translateX(-5px);
+					background: #2a1717;
+				}
+				50% {
+					transform: translateX(5px);
+				}
+				75% {
+					transform: translateX(-3px);
+					background: #111;
+				}
+			}
+			@keyframes event-lock {
+				0%,
+				100% {
+					outline: 0 solid #fff;
+				}
+				50% {
+					outline: 3px solid #fff;
+					outline-offset: -6px;
+				}
+			}
+			@keyframes event-recover {
+				0%,
+				100% {
+					background: #111;
+				}
+				50% {
+					background: #17241d;
+					border-color: #ddd;
+				}
+			}
+			@keyframes event-status {
+				0%,
+				100% {
+					border-style: solid;
+				}
+				35%,
+				70% {
+					border-style: dashed;
+					border-color: #fff;
+				}
+			}
+			@keyframes event-win {
+				0%,
+				100% {
+					transform: scale(1);
+				}
+				35% {
+					transform: scale(1.015);
+					outline: 3px double #fff;
+					outline-offset: 4px;
+				}
+			}
+			@media (prefers-reduced-motion: reduce) {
+				.creature,
+				#battle-event {
+					animation: none !important;
+					transition: none !important;
+				}
+			}
+			@media (max-width: 600px) {
+				.creatures,
+				#moves,
+				.round-panel,
+				.payload-actions {
+					grid-template-columns: 1fr;
+				}
+			}
 		</style>
 	</head>
 	<body>
@@ -84,6 +433,17 @@
 			<section id="lobby">
 				<h1>DEMONYM CONNECT</h1>
 				<div class="lobby">
+					<div class="client-mode">
+						<label for="client-mode">TEST CLIENT TYPE</label>
+						<select id="client-mode">
+							<option value="web">Web Browser</option>
+							<option value="cardputer">Cardputer Mock</option>
+						</select>
+						<small
+							>Cardputer Mock still uses this browser UI, but must pass the device handshake before the server accepts a Cardputer creature
+							payload.</small
+						>
+					</div>
 					<button id="create">Create Battle</button>
 					<div class="join">
 						<input id="room-code" type="text" maxlength="6" placeholder="Battle Code" autocomplete="off" />
@@ -96,6 +456,7 @@
 				<h1>DEMONYM CONNECT</h1>
 				<div class="room">Battle Code: <strong id="current-room"></strong> · Match <strong id="match-number">1</strong></div>
 				<div id="player-label">Connecting...</div>
+				<div id="connection-meta">Handshake pending...</div>
 
 				<div class="creatures">
 					<div id="player-1" class="creature">
@@ -103,6 +464,7 @@
 						<div id="name-1" class="creature-name">Husk Demonym</div>
 						<div>Lineage: <span id="lineage-1">Husk</span></div>
 						<div class="source-line">Source: <span id="source-1">WEB TEST</span></div>
+						<div class="source-line">Client: <span id="client-1">WAITING</span></div>
 						<div class="stat">HP: <span id="hp-1">100</span>/<span id="max-hp-1">100</span></div>
 						<div class="stat">Energy: <span id="energy-1">7</span>/<span id="max-energy-1">10</span></div>
 						<div class="status-list" id="statuses-1">No statuses</div>
@@ -114,6 +476,7 @@
 						<div id="name-2" class="creature-name">Wisp Demonym</div>
 						<div>Lineage: <span id="lineage-2">Wisp</span></div>
 						<div class="source-line">Source: <span id="source-2">WEB TEST</span></div>
+						<div class="source-line">Client: <span id="client-2">WAITING</span></div>
 						<div class="stat">HP: <span id="hp-2">100</span>/<span id="max-hp-2">100</span></div>
 						<div class="stat">Energy: <span id="energy-2">7</span>/<span id="max-energy-2">10</span></div>
 						<div class="status-list" id="statuses-2">No statuses</div>
@@ -129,14 +492,17 @@
 
 				<details class="payload-lab">
 					<summary>DEVICE PAYLOAD TEST</summary>
-					<p>This developer tool simulates a Cardputer sending its creature to the room. Generate a mock payload from your current creature, edit it if you want to test validation, then import it before pressing READY.</p>
+					<p>
+						This developer tool simulates a Cardputer sending its creature to the room. To import a device creature, connect from the lobby
+						as <strong>Cardputer Mock</strong>, complete the handshake, generate or edit a payload, then import it before pressing READY.
+					</p>
 					<textarea id="payload-json" spellcheck="false" aria-label="Mock Cardputer creature payload"></textarea>
 					<div class="payload-actions">
 						<button id="generate-payload">GENERATE MOCK</button>
 						<button id="import-payload">IMPORT PAYLOAD</button>
 						<button id="web-preset">USE WEB PRESET</button>
 					</div>
-					<div id="payload-status">Protocol test only. This is not live Cardputer transport yet.</div>
+					<div id="payload-status">Connect as Cardputer Mock to exercise the full device handshake + creature handoff path.</div>
 				</details>
 
 				<div id="signal-toss"></div>
@@ -164,16 +530,19 @@
 					<ol id="battle-log"></ol>
 				</div>
 
-				<div class="note">v0.2.8 external-payload test build. The room can now accept and validate a mock Cardputer creature payload before READY, while keeping the same hidden round-lock battle flow. This tests the handoff contract only; live Cardputer transport and exact firmware balance sync come later.</div>
+				<div class="note">
+					v0.2.9 handshake test build. Every client must negotiate Demonym Connect protocol v1 and required capabilities before entering the
+					room. Cardputer creature imports are only accepted from a client that identified itself as Cardputer during that handshake.
+				</div>
 			</section>
 		</main>
 
 		<script>
-
 			const lobby = document.querySelector('#lobby');
 			const battle = document.querySelector('#battle');
 			const createButton = document.querySelector('#create');
 			const joinButton = document.querySelector('#join');
+			const clientModeSelect = document.querySelector('#client-mode');
 			const readyButton = document.querySelector('#ready');
 			const lineageSelect = document.querySelector('#lineage-select');
 			const payloadJson = document.querySelector('#payload-json');
@@ -185,6 +554,7 @@
 			const roomInput = document.querySelector('#room-code');
 			const currentRoom = document.querySelector('#current-room');
 			const playerLabel = document.querySelector('#player-label');
+			const connectionMeta = document.querySelector('#connection-meta');
 			const matchNumber = document.querySelector('#match-number');
 			const signalToss = document.querySelector('#signal-toss');
 			const battleEvent = document.querySelector('#battle-event');
@@ -206,6 +576,10 @@
 			let socket = null;
 			let playerNumber = null;
 			let connectedPlayers = [];
+			let connectedClients = [];
+			let requestedClientType = 'web';
+			let handshakeComplete = false;
+			let connectionProtocol = null;
 			let state = null;
 			let moveLibrary = {};
 			let lineageLibrary = {};
@@ -213,6 +587,8 @@
 			let battleProtocol = {};
 			let lastEventId = 0;
 			let eventQueue = Promise.resolve();
+
+			const CLIENT_CAPABILITIES = ['creature-payload-v1', 'round-lock-v1', 'battle-events-v1', 'recover-action-v1', 'rematch-v1'];
 
 			const statusNames = {
 				stagger: 'Stagger',
@@ -230,14 +606,39 @@
 				currentRoom.textContent = code;
 			}
 
-			function setText(id, value) { document.querySelector(id).textContent = value; }
+			function setText(id, value) {
+				document.querySelector(id).textContent = value;
+			}
 
 			function sendMessage(message) {
 				if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 			}
 
+			function clientInfoForPlayer(player) {
+				return connectedClients.find((item) => item.player === player) ?? null;
+			}
 
-			function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+			function clientLabel(info) {
+				if (!info) return 'WAITING';
+				return info.clientType === 'cardputer' ? `CARDPUTER · ${info.clientVersion}` : `WEB · ${info.clientVersion}`;
+			}
+
+			function sendClientHello() {
+				if (!connectionProtocol) return;
+				const version = requestedClientType === 'cardputer' ? 'browser-mock-0.2.9' : 'web-0.2.9';
+				sendMessage({
+					type: 'client-hello',
+					protocol: connectionProtocol.name,
+					protocolVersion: connectionProtocol.version,
+					clientType: requestedClientType,
+					clientVersion: version,
+					capabilities: CLIENT_CAPABILITIES,
+				});
+			}
+
+			function sleep(ms) {
+				return new Promise((resolve) => setTimeout(resolve, ms));
+			}
 
 			function cardForPlayer(player) {
 				return player === 1 ? player1Card : player2Card;
@@ -274,7 +675,10 @@
 				}
 
 				if (event.type === 'creature_imported') {
-					await Promise.all([pulseCard(event.player, 'event-status', 520), showBattleEvent(`P${event.player} // DEVICE CREATURE LOADED`, 560)]);
+					await Promise.all([
+						pulseCard(event.player, 'event-status', 520),
+						showBattleEvent(`P${event.player} // DEVICE CREATURE LOADED`, 560),
+					]);
 					return;
 				}
 
@@ -299,24 +703,36 @@
 				}
 
 				if (event.type === 'move_missed') {
-					await Promise.all([pulseCard(event.player, 'event-act'), showBattleEvent(`P${event.player} // ${moveName(event.moveId).toUpperCase()} // MISS`, 560)]);
+					await Promise.all([
+						pulseCard(event.player, 'event-act'),
+						showBattleEvent(`P${event.player} // ${moveName(event.moveId).toUpperCase()} // MISS`, 560),
+					]);
 					return;
 				}
 
 				if (event.type === 'recover') {
 					const source = event.moveId ? moveName(event.moveId).toUpperCase() : 'RECOVER';
-					await Promise.all([pulseCard(event.player, 'event-recover', 520), showBattleEvent(`P${event.player} // ${source} // +${event.amount ?? 0} EN`, 560)]);
+					await Promise.all([
+						pulseCard(event.player, 'event-recover', 520),
+						showBattleEvent(`P${event.player} // ${source} // +${event.amount ?? 0} EN`, 560),
+					]);
 					return;
 				}
 
 				if (event.type === 'heal') {
-					await Promise.all([pulseCard(event.targetPlayer ?? event.player, 'event-recover', 520), showBattleEvent(`P${event.player} // ${moveName(event.moveId).toUpperCase()} // +${event.amount ?? 0} HP`, 560)]);
+					await Promise.all([
+						pulseCard(event.targetPlayer ?? event.player, 'event-recover', 520),
+						showBattleEvent(`P${event.player} // ${moveName(event.moveId).toUpperCase()} // +${event.amount ?? 0} HP`, 560),
+					]);
 					return;
 				}
 
 				if (event.type === 'status_applied') {
 					const label = statusNames[event.statusId] ?? event.statusId ?? 'STATUS';
-					await Promise.all([pulseCard(event.targetPlayer, 'event-status', 520), showBattleEvent(`P${event.targetPlayer} // ${String(label).toUpperCase()}`, 480)]);
+					await Promise.all([
+						pulseCard(event.targetPlayer, 'event-status', 520),
+						showBattleEvent(`P${event.targetPlayer} // ${String(label).toUpperCase()}`, 480),
+					]);
 					return;
 				}
 
@@ -334,6 +750,10 @@
 
 			function connectToRoom(code) {
 				code = code.trim().toUpperCase();
+				requestedClientType = clientModeSelect.value === 'cardputer' ? 'cardputer' : 'web';
+				handshakeComplete = false;
+				connectionProtocol = null;
+				connectedClients = [];
 				if (!/^[A-Z2-9]{6}$/.test(code)) {
 					alert('Enter a valid 6-character battle code.');
 					return;
@@ -343,20 +763,47 @@
 				const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
 				socket = new WebSocket(`${protocol}://${location.host}/api/rooms/${code}/ws`);
 
-				socket.addEventListener('open', () => { status.textContent = 'Connected.'; });
+				socket.addEventListener('open', () => {
+					status.textContent = 'Connected. Waiting for protocol handshake...';
+				});
 				socket.addEventListener('message', (event) => {
 					const message = JSON.parse(event.data);
+
+					if (message.type === 'hello-required') {
+						connectionProtocol = message.connectionProtocol;
+						playerNumber = message.player;
+						connectionMeta.textContent = `Handshake requested · ${connectionProtocol.name} v${connectionProtocol.version} · ${requestedClientType === 'cardputer' ? 'CARDPUTER MOCK' : 'WEB'}`;
+						status.textContent = 'Negotiating client capabilities...';
+						sendClientHello();
+						return;
+					}
+
+					if (message.type === 'hello-ack') {
+						handshakeComplete = true;
+						connectionProtocol = message.connectionProtocol ?? connectionProtocol;
+						connectionMeta.textContent = `Handshake accepted · ${message.client.clientType.toUpperCase()} · ${message.client.clientVersion} · protocol v${connectionProtocol.version}`;
+						status.textContent = 'Handshake accepted. Loading battle room...';
+						return;
+					}
+
+					if (message.type === 'hello-reject') {
+						handshakeComplete = false;
+						connectionMeta.textContent = 'Handshake rejected';
+						status.textContent = message.message ?? 'Handshake rejected.';
+						return;
+					}
 
 					if (message.type === 'welcome') {
 						playerNumber = message.player;
 						state = message.state;
 						connectedPlayers = message.connectedPlayers ?? [];
+						connectedClients = message.connectedClients ?? [];
 						moveLibrary = message.moveLibrary ?? {};
 						lineageLibrary = message.lineageLibrary ?? {};
 						battleConfig = message.battleConfig ?? battleConfig;
 						battleProtocol = message.battleProtocol ?? battleProtocol;
 						lastEventId = state.eventSeq ?? 0;
-						playerLabel.textContent = `You are Player ${playerNumber}`;
+						playerLabel.textContent = `You are Player ${playerNumber} · ${requestedClientType === 'cardputer' ? 'Cardputer Mock' : 'Web Browser'}`;
 						player1Card.classList.toggle('you', playerNumber === 1);
 						player2Card.classList.toggle('you', playerNumber === 2);
 						render();
@@ -367,6 +814,7 @@
 						const previousEventId = lastEventId;
 						state = message.state;
 						connectedPlayers = message.connectedPlayers ?? [];
+						connectedClients = message.connectedClients ?? connectedClients;
 						moveLibrary = message.moveLibrary ?? moveLibrary;
 						lineageLibrary = message.lineageLibrary ?? lineageLibrary;
 						battleConfig = message.battleConfig ?? battleConfig;
@@ -380,11 +828,17 @@
 
 					if (message.type === 'error') {
 						status.textContent = message.message;
-						if (String(message.message).toLowerCase().includes('payload') || String(message.message).toLowerCase().includes('creature')) payloadStatus.textContent = message.message;
+						if (
+							String(message.message).toLowerCase().includes('payload') ||
+							String(message.message).toLowerCase().includes('creature') ||
+							String(message.message).toLowerCase().includes('cardputer')
+						)
+							payloadStatus.textContent = message.message;
 					}
 				});
 
 				socket.addEventListener('close', () => {
+					handshakeComplete = false;
 					readyButton.disabled = true;
 					movesContainer.innerHTML = '';
 					status.textContent = 'Disconnected.';
@@ -401,7 +855,8 @@
 				const creature = state.players[player - 1];
 				setText(`#name-${player}`, creature.payload.name);
 				setText(`#lineage-${player}`, creature.payload.lineage);
-				setText(`#source-${player}`, creature.payload.source === 'cardputer' ? 'CARDPUTER MOCK' : 'WEB TEST');
+				setText(`#source-${player}`, creature.payload.source === 'cardputer' ? 'CARDPUTER PAYLOAD' : 'WEB TEST');
+				setText(`#client-${player}`, clientLabel(clientInfoForPlayer(player)));
 				setText(`#hp-${player}`, creature.hp);
 				setText(`#max-hp-${player}`, creature.payload.stats.maxHp);
 				setText(`#energy-${player}`, creature.energy);
@@ -451,13 +906,21 @@
 			function renderPayloadLab() {
 				if (!playerNumber || !state) return;
 				const editable = canEditCreature();
+				const myClient = clientInfoForPlayer(playerNumber);
+				const deviceHandshake = myClient?.clientType === 'cardputer';
 				generatePayloadButton.disabled = !editable;
-				importPayloadButton.disabled = !editable;
+				importPayloadButton.disabled = !editable || !deviceHandshake;
 				webPresetButton.disabled = !editable;
 				const current = state.players[playerNumber - 1].payload;
-				payloadStatus.textContent = current.source === 'cardputer'
-					? `Loaded from mock Cardputer payload: ${current.creatureId}`
-					: 'Using server web-test preset. Generate a mock payload to simulate device handoff.';
+
+				if (!deviceHandshake) {
+					payloadStatus.textContent =
+						'Device import locked: this connection identified as a Web client. Start a new room as Cardputer Mock to test device handoff.';
+				} else if (current.source === 'cardputer') {
+					payloadStatus.textContent = `Accepted through Cardputer handshake: ${current.creatureId}`;
+				} else {
+					payloadStatus.textContent = 'Cardputer Mock handshake accepted. Generate and import a device payload before READY.';
+				}
 			}
 
 			function renderLineagePicker() {
@@ -577,6 +1040,10 @@
 				renderLineagePicker();
 				renderPayloadLab();
 				matchNumber.textContent = state.matchNumber ?? 1;
+				const myClient = clientInfoForPlayer(playerNumber);
+				if (handshakeComplete && myClient && connectionProtocol) {
+					connectionMeta.textContent = `Handshake accepted · ${clientLabel(myClient)} · ${connectionProtocol.name} v${connectionProtocol.version} · server ${connectionProtocol.serverVersion}`;
+				}
 
 				player1Card.classList.toggle('active', state.started && state.roundFirstPlayer === 1 && state.winner === null);
 				player2Card.classList.toggle('active', state.started && state.roundFirstPlayer === 2 && state.winner === null);
@@ -587,9 +1054,8 @@
 				const opponent = playerNumber === 1 ? 2 : 1;
 				const opponentLocked = Boolean(state.lockedPlayers?.[opponent - 1]);
 
-				signalToss.textContent = state.started && state.initiativeWinner
-					? `SIGNAL TOSS: Player ${state.initiativeWinner} gets Round 1 priority.`
-					: '';
+				signalToss.textContent =
+					state.started && state.initiativeWinner ? `SIGNAL TOSS: Player ${state.initiativeWinner} gets Round 1 priority.` : '';
 				renderRoundPanel(myLocked, opponentLocked, opponent);
 				renderResultPanel();
 				readyButton.disabled = !bothConnected || playerReady || state.winner !== null;
@@ -618,11 +1084,15 @@
 					const response = await fetch('/api/rooms', { method: 'POST' });
 					const data = await response.json();
 					connectToRoom(data.code);
-				} finally { createButton.disabled = false; }
+				} finally {
+					createButton.disabled = false;
+				}
 			});
 
 			joinButton.addEventListener('click', () => connectToRoom(roomInput.value));
-			roomInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') connectToRoom(roomInput.value); });
+			roomInput.addEventListener('keydown', (event) => {
+				if (event.key === 'Enter') connectToRoom(roomInput.value);
+			});
 			lineageSelect.addEventListener('change', () => sendMessage({ type: 'select-lineage', lineage: lineageSelect.value }));
 			generatePayloadButton.addEventListener('click', () => {
 				const payload = buildMockDevicePayload();
