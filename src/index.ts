@@ -6,6 +6,8 @@ type Pressure = 'Neutral' | 'Force' | 'Signal' | 'Heat' | 'Corrosion' | 'Echo';
 type MoveRole = 'attack' | 'guard' | 'heal' | 'utility';
 type BattlePhase = 'waiting' | 'selecting' | 'finished';
 type StatusId = 'stagger' | 'disruption' | 'burn' | 'corrosion' | 'echo-interference' | 'evasion' | 'ward';
+type BattleEventType = 'lineage_selected' | 'ready' | 'signal_toss' | 'round_start' | 'action_locked' | 'move_resolved' | 'move_missed' | 'recover' | 'status_applied' | 'heal' | 'battle_end' | 'rematch_requested' | 'rematch_started' | 'disconnect';
+type CreaturePayloadSource = 'web-test' | 'cardputer';
 
 type MoveId =
 	| 'pulse-strike'
@@ -42,20 +44,42 @@ interface MoveDefinition {
 	signatureOf?: Lineage;
 }
 
-interface CreatureState {
+interface BattleCreaturePayload {
+	format: 'demonym-battle-creature';
+	version: 1;
+	source: CreaturePayloadSource;
+	creatureId: string;
 	name: string;
 	lineage: Lineage;
+	stats: {
+		maxHp: number;
+		maxEnergy: number;
+	};
+	moveIds: MoveId[];
+}
+
+interface CreatureState {
+	payload: BattleCreaturePayload;
 	hp: number;
-	maxHp: number;
 	energy: number;
-	maxEnergy: number;
-	moves: MoveId[];
 	statuses: StatusState[];
 	lastMoveId: MoveId | null;
 }
 
+interface BattleEvent {
+	id: number;
+	type: BattleEventType;
+	round: number;
+	player?: PlayerNumber;
+	targetPlayer?: PlayerNumber;
+	moveId?: MoveId;
+	amount?: number;
+	statusId?: StatusId;
+	message: string;
+}
+
 interface BattleState {
-	version: 8;
+	version: 9;
 	players: [CreatureState, CreatureState];
 	ready: [boolean, boolean];
 	started: boolean;
@@ -69,6 +93,8 @@ interface BattleState {
 	rematch: [boolean, boolean];
 	matchNumber: number;
 	log: string[];
+	eventSeq: number;
+	events: BattleEvent[];
 }
 
 interface SocketAttachment {
@@ -279,6 +305,7 @@ const MAX_ENERGY = 10;
 const ENERGY_RECOVERY_PER_ROUND = 1;
 const RECOVER_ENERGY = 2;
 const MAX_LOG_ENTRIES = 24;
+const MAX_BATTLE_EVENTS = 40;
 const DISRUPTION_EXTRA_COST = 2;
 const WARD_DAMAGE_REDUCTION = 0.5;
 const EVASION_BONUS = 20;
@@ -290,21 +317,56 @@ const BATTLE_CONFIG = {
 	energyRecoveryPerRound: ENERGY_RECOVERY_PER_ROUND,
 };
 
-function createCreature(player: PlayerNumber, lineage?: Lineage): CreatureState {
-	const selectedLineage: Lineage = lineage ?? (player === 1 ? 'Husk' : 'Wisp');
-	const preset = LINEAGE_LIBRARY[selectedLineage];
+const BATTLE_PROTOCOL = {
+	version: 1,
+	creaturePayloadFormat: 'demonym-battle-creature',
+	creaturePayloadVersion: 1,
+	battleEventVersion: 1,
+};
+
+function createWebTestPayload(lineage: Lineage): BattleCreaturePayload {
+	const preset = LINEAGE_LIBRARY[lineage];
+	return {
+		format: 'demonym-battle-creature',
+		version: 1,
+		source: 'web-test',
+		creatureId: `web-test-${lineage.toLowerCase()}`,
+		name: `${preset.name} Demonym`,
+		lineage,
+		stats: { maxHp: STARTING_HP, maxEnergy: MAX_ENERGY },
+		moveIds: [...preset.moves],
+	};
+}
+
+function validateBattleCreaturePayload(payload: unknown): payload is BattleCreaturePayload {
+	if (!payload || typeof payload !== 'object') return false;
+	const candidate = payload as Partial<BattleCreaturePayload>;
+	if (candidate.format !== 'demonym-battle-creature' || candidate.version !== 1) return false;
+	if (!candidate.lineage || !(candidate.lineage in LINEAGE_LIBRARY)) return false;
+	if (!candidate.creatureId || !candidate.name) return false;
+	if (!candidate.stats || !Number.isInteger(candidate.stats.maxHp) || candidate.stats.maxHp <= 0) return false;
+	if (!Number.isInteger(candidate.stats.maxEnergy) || candidate.stats.maxEnergy <= 0) return false;
+	if (!Array.isArray(candidate.moveIds) || candidate.moveIds.length !== 4 || new Set(candidate.moveIds).size !== 4) return false;
+	return candidate.moveIds.every((moveId) => moveId in MOVE_LIBRARY);
+}
+
+function createCreatureFromPayload(payload: BattleCreaturePayload): CreatureState {
+	if (!validateBattleCreaturePayload(payload)) {
+		throw new Error('Invalid Demonym battle creature payload.');
+	}
 
 	return {
-		name: `${preset.name} Demonym`,
-		lineage: selectedLineage,
-		hp: STARTING_HP,
-		maxHp: STARTING_HP,
-		energy: STARTING_ENERGY,
-		maxEnergy: MAX_ENERGY,
-		moves: [...preset.moves],
+		payload: structuredClone(payload),
+		hp: payload.stats.maxHp,
+		energy: Math.min(STARTING_ENERGY, payload.stats.maxEnergy),
 		statuses: [],
 		lastMoveId: null,
 	};
+}
+
+function createCreature(player: PlayerNumber, lineage?: Lineage): CreatureState {
+	const selectedLineage: Lineage = lineage ?? (player === 1 ? 'Husk' : 'Wisp');
+	return createCreatureFromPayload(createWebTestPayload(selectedLineage));
 }
 
 function pickStartingPlayer(): PlayerNumber {
@@ -321,7 +383,7 @@ function randomPercent(): number {
 
 function createInitialState(): BattleState {
 	return {
-		version: 8,
+		version: 9,
 		players: [createCreature(1), createCreature(2)],
 		ready: [false, false],
 		started: false,
@@ -335,6 +397,8 @@ function createInitialState(): BattleState {
 		rematch: [false, false],
 		matchNumber: 1,
 		log: ['Battle room created.'],
+		eventSeq: 0,
+		events: [],
 	};
 }
 
@@ -374,7 +438,7 @@ function healCreature(creature: CreatureState, amount: number): number {
 	}
 
 	const before = creature.hp;
-	creature.hp = Math.min(creature.maxHp, creature.hp + adjusted);
+	creature.hp = Math.min(creature.payload.stats.maxHp, creature.hp + adjusted);
 	return creature.hp - before;
 }
 
@@ -427,7 +491,7 @@ export class BattleRoom extends DurableObject<Env> {
 	private async getState(): Promise<BattleState> {
 		const storedState = await this.ctx.storage.get<BattleState | { version?: number }>('state');
 
-		if (!storedState || storedState.version !== 8) {
+		if (!storedState || storedState.version !== 9) {
 			const state = createInitialState();
 			await this.ctx.storage.put('state', state);
 			return state;
@@ -455,6 +519,19 @@ export class BattleRoom extends DurableObject<Env> {
 		state.log.push(message);
 		if (state.log.length > MAX_LOG_ENTRIES) {
 			state.log.splice(0, state.log.length - MAX_LOG_ENTRIES);
+		}
+	}
+
+	private addEvent(state: BattleState, event: Omit<BattleEvent, 'id' | 'round'> & { round?: number }) {
+		state.eventSeq += 1;
+		state.events.push({
+			id: state.eventSeq,
+			round: event.round ?? state.round,
+			...event,
+		});
+
+		if (state.events.length > MAX_BATTLE_EVENTS) {
+			state.events.splice(0, state.events.length - MAX_BATTLE_EVENTS);
 		}
 	}
 
@@ -486,6 +563,7 @@ export class BattleRoom extends DurableObject<Env> {
 			moveLibrary: MOVE_LIBRARY,
 			lineageLibrary: LINEAGE_LIBRARY,
 			battleConfig: BATTLE_CONFIG,
+			battleProtocol: BATTLE_PROTOCOL,
 		});
 	}
 
@@ -500,8 +578,8 @@ export class BattleRoom extends DurableObject<Env> {
 	}
 
 	private resetForRematch(state: BattleState) {
-		const player1Lineage = state.players[0].lineage;
-		const player2Lineage = state.players[1].lineage;
+		const player1Lineage = state.players[0].payload.lineage;
+		const player2Lineage = state.players[1].payload.lineage;
 
 		state.players = [createCreature(1, player1Lineage), createCreature(2, player2Lineage)];
 		state.ready = [false, false];
@@ -516,6 +594,7 @@ export class BattleRoom extends DurableObject<Env> {
 		state.rematch = [false, false];
 		state.matchNumber += 1;
 		state.log = [`Match ${state.matchNumber} ready. Choose your lineage and press READY.`];
+		this.addEvent(state, { type: 'rematch_started', round: 0, message: `Match ${state.matchNumber} ready.` });
 	}
 
 	private async handleRematch(socket: WebSocket, player: PlayerNumber) {
@@ -535,6 +614,7 @@ export class BattleRoom extends DurableObject<Env> {
 
 		state.rematch[player - 1] = true;
 		this.addLog(state, `Player ${player} requested a rematch.`);
+		this.addEvent(state, { type: 'rematch_requested', player, message: `Player ${player} requested a rematch.` });
 
 		if (state.rematch[0] && state.rematch[1]) {
 			this.resetForRematch(state);
@@ -555,6 +635,7 @@ export class BattleRoom extends DurableObject<Env> {
 
 		state.ready[player - 1] = true;
 		this.addLog(state, `Player ${player} is ready.`);
+		this.addEvent(state, { type: 'ready', player, message: `Player ${player} is ready.` });
 
 		if (state.ready[0] && state.ready[1] && this.bothPlayersConnected()) {
 			const startingPlayer = pickStartingPlayer();
@@ -568,7 +649,9 @@ export class BattleRoom extends DurableObject<Env> {
 			state.rematch = [false, false];
 			this.addLog(state, 'Both players ready. Signal Toss...');
 			this.addLog(state, `Player ${startingPlayer} wins the Signal Toss and has first resolution priority.`);
+			this.addEvent(state, { type: 'signal_toss', player: startingPlayer, message: `Player ${startingPlayer} wins the Signal Toss.` });
 			this.addLog(state, 'Round 1: both players lock in a move.');
+			this.addEvent(state, { type: 'round_start', player: startingPlayer, message: `Round 1. Player ${startingPlayer} resolves first.` });
 		}
 
 		await this.saveAndBroadcast(state);
@@ -593,10 +676,11 @@ export class BattleRoom extends DurableObject<Env> {
 		}
 
 		const lineage = rawLineage as Lineage;
-		if (state.players[player - 1].lineage === lineage) return;
+		if (state.players[player - 1].payload.lineage === lineage) return;
 
 		state.players[player - 1] = createCreature(player, lineage);
 		this.addLog(state, `Player ${player} selected ${lineage}.`);
+		this.addEvent(state, { type: 'lineage_selected', player, message: `Player ${player} selected ${lineage}.` });
 		await this.saveAndBroadcast(state);
 	}
 
@@ -610,12 +694,15 @@ export class BattleRoom extends DurableObject<Env> {
 		if (move.id === 'quiet-ward') {
 			addOrRefreshStatus(attacker, 'ward', 2);
 			this.addLog(state, `${attackerLabel} raised Quiet Ward.`);
+			this.addEvent(state, { type: 'move_resolved', player, targetPlayer: player, moveId: move.id, message: `${attackerLabel} raised Quiet Ward.` });
+			this.addEvent(state, { type: 'status_applied', player, targetPlayer: player, moveId: move.id, statusId: 'ward', message: `${attackerLabel} gained Ward.` });
 			return;
 		}
 
 		if (move.id === 'restore-pulse') {
 			const healed = healCreature(attacker, move.power);
 			this.addLog(state, `${attackerLabel} used Restore Pulse and restored ${healed} HP.`);
+			this.addEvent(state, { type: 'heal', player, targetPlayer: player, moveId: move.id, amount: healed, message: `${attackerLabel} restored ${healed} HP.` });
 			return;
 		}
 
@@ -624,12 +711,16 @@ export class BattleRoom extends DurableObject<Env> {
 			const healed = healCreature(attacker, move.power);
 			addOrRefreshStatus(attacker, 'ward', 2);
 			this.addLog(state, `${attackerLabel} used Shell Brace: ${healed} HP restored${cleared ? ', Stagger cleared' : ''}, Ward raised.`);
+			this.addEvent(state, { type: 'heal', player, targetPlayer: player, moveId: move.id, amount: healed, message: `${attackerLabel} used Shell Brace.` });
+			this.addEvent(state, { type: 'status_applied', player, targetPlayer: player, moveId: move.id, statusId: 'ward', message: `${attackerLabel} gained Ward.` });
 			return;
 		}
 
 		if (move.id === 'phase-feint') {
 			addOrRefreshStatus(attacker, 'evasion', 2);
 			this.addLog(state, `${attackerLabel} used Phase Feint and became harder to hit.`);
+			this.addEvent(state, { type: 'move_resolved', player, targetPlayer: player, moveId: move.id, message: `${attackerLabel} used Phase Feint.` });
+			this.addEvent(state, { type: 'status_applied', player, targetPlayer: player, moveId: move.id, statusId: 'evasion', message: `${attackerLabel} gained Evasion.` });
 			return;
 		}
 
@@ -637,15 +728,16 @@ export class BattleRoom extends DurableObject<Env> {
 			const clearedDisruption = removeStatus(attacker, 'disruption');
 			const clearedEcho = removeStatus(attacker, 'echo-interference');
 			const before = attacker.energy;
-			attacker.energy = Math.min(attacker.maxEnergy, attacker.energy + move.power);
+			attacker.energy = Math.min(attacker.payload.stats.maxEnergy, attacker.energy + move.power);
 			const restored = attacker.energy - before;
 			this.addLog(state, `${attackerLabel} used Panel Shift: ${restored} Energy restored${clearedDisruption || clearedEcho ? ', noise cleared' : ''}.`);
+			this.addEvent(state, { type: 'recover', player, targetPlayer: player, moveId: move.id, amount: restored, message: `${attackerLabel} restored ${restored} Energy with Panel Shift.` });
 			return;
 		}
 
 		let damage = move.power;
 
-		if (move.id === 'pursuit-bite' && defender.hp <= Math.ceil(defender.maxHp * 0.35)) {
+		if (move.id === 'pursuit-bite' && defender.hp <= Math.ceil(defender.payload.stats.maxHp * 0.35)) {
 			damage += 10;
 		}
 
@@ -663,15 +755,20 @@ export class BattleRoom extends DurableObject<Env> {
 
 		const dealt = damageCreature(defender, damage);
 		this.addLog(state, `${attackerLabel} used ${move.name} for ${dealt} damage.`);
+		this.addEvent(state, { type: 'move_resolved', player, targetPlayer: opponent, moveId: move.id, amount: dealt, message: `${attackerLabel} used ${move.name} for ${dealt} damage.` });
 
 		if (move.id === 'signal-snare') {
 			addOrRefreshStatus(defender, 'disruption', 3);
 			this.addLog(state, `${defenderLabel} is Disrupted. Move costs are increased.`);
+			this.addEvent(state, { type: 'status_applied', player, targetPlayer: opponent, moveId: move.id, statusId: 'disruption', message: `${defenderLabel} is Disrupted.` });
 		}
 
 		if (move.id === 'bog-leech') {
 			const healed = healCreature(attacker, Math.max(1, Math.ceil(dealt / (hasStatus(defender, 'corrosion') ? 2 : 3))));
-			if (healed > 0) this.addLog(state, `${attackerLabel} drained ${healed} HP.`);
+			if (healed > 0) {
+				this.addLog(state, `${attackerLabel} drained ${healed} HP.`);
+				this.addEvent(state, { type: 'heal', player, targetPlayer: player, moveId: move.id, amount: healed, message: `${attackerLabel} drained ${healed} HP.` });
+			}
 		}
 
 		if (move.id === 'reckless-rush') {
@@ -684,6 +781,7 @@ export class BattleRoom extends DurableObject<Env> {
 			addOrRefreshStatus(defender, 'echo-interference', 3, true);
 			const stacks = getStatus(defender, 'echo-interference')?.stacks ?? 1;
 			this.addLog(state, `${defenderLabel} has Echo Interference x${stacks}.`);
+			this.addEvent(state, { type: 'status_applied', player, targetPlayer: opponent, moveId: move.id, statusId: 'echo-interference', message: `${defenderLabel} has Echo Interference x${stacks}.` });
 		}
 	}
 
@@ -703,7 +801,7 @@ export class BattleRoom extends DurableObject<Env> {
 			}
 
 			creature.statuses = creature.statuses.filter((status) => status.turns > 0);
-			creature.energy = Math.min(creature.maxEnergy, creature.energy + ENERGY_RECOVERY_PER_ROUND);
+			creature.energy = Math.min(creature.payload.stats.maxEnergy, creature.energy + ENERGY_RECOVERY_PER_ROUND);
 		}
 	}
 
@@ -718,8 +816,10 @@ export class BattleRoom extends DurableObject<Env> {
 
 		if (action === 'recover') {
 			const before = attacker.energy;
-			attacker.energy = Math.min(attacker.maxEnergy, attacker.energy + RECOVER_ENERGY);
-			this.addLog(state, `Player ${player} used Recover and restored ${attacker.energy - before} Energy.`);
+			attacker.energy = Math.min(attacker.payload.stats.maxEnergy, attacker.energy + RECOVER_ENERGY);
+			const restored = attacker.energy - before;
+			this.addLog(state, `Player ${player} used Recover and restored ${restored} Energy.`);
+			this.addEvent(state, { type: 'recover', player, targetPlayer: player, amount: restored, message: `Player ${player} restored ${restored} Energy.` });
 			return;
 		}
 
@@ -731,6 +831,7 @@ export class BattleRoom extends DurableObject<Env> {
 
 		if (!hit) {
 			this.addLog(state, `Player ${player} used ${move.name}, but it missed.`);
+			this.addEvent(state, { type: 'move_missed', player, targetPlayer: opponent, moveId: move.id, message: `Player ${player} used ${move.name}, but it missed.` });
 		} else {
 			this.resolveMoveEffect(state, player, move);
 		}
@@ -745,10 +846,12 @@ export class BattleRoom extends DurableObject<Env> {
 			state.winner = player;
 			state.phase = 'finished';
 			this.addLog(state, `Player ${player} wins.`);
+			this.addEvent(state, { type: 'battle_end', player, message: `Player ${player} wins.` });
 		} else if (attacker.hp <= 0) {
 			state.winner = opponent;
 			state.phase = 'finished';
 			this.addLog(state, `Player ${opponent} wins.`);
+			this.addEvent(state, { type: 'battle_end', player: opponent, message: `Player ${opponent} wins.` });
 		}
 	}
 
@@ -774,6 +877,7 @@ export class BattleRoom extends DurableObject<Env> {
 		state.lockedMoves = [null, null];
 		state.lockedCosts = [null, null];
 		this.addLog(state, `Round ${state.round}: both players lock in a move. Player ${state.roundFirstPlayer} resolves first.`);
+		this.addEvent(state, { type: 'round_start', player: state.roundFirstPlayer, message: `Round ${state.round}. Player ${state.roundFirstPlayer} resolves first.` });
 	}
 
 	private async lockAction(socket: WebSocket, player: PlayerNumber, action: MoveId | 'recover', cost: number) {
@@ -802,6 +906,7 @@ export class BattleRoom extends DurableObject<Env> {
 		state.lockedMoves[player - 1] = action;
 		state.lockedCosts[player - 1] = cost;
 		this.addLog(state, `Player ${player} locked in a move.`);
+		this.addEvent(state, { type: 'action_locked', player, message: `Player ${player} locked in a move.` });
 
 		if (state.lockedMoves[0] !== null && state.lockedMoves[1] !== null) {
 			this.resolveRound(state);
@@ -842,7 +947,7 @@ export class BattleRoom extends DurableObject<Env> {
 		const move = MOVE_LIBRARY[moveId];
 		const attacker = state.players[player - 1];
 
-		if (!attacker.moves.includes(moveId)) {
+		if (!attacker.payload.moveIds.includes(moveId)) {
 			this.send(socket, { type: 'error', message: 'That creature does not know this move.' });
 			return;
 		}
@@ -947,6 +1052,7 @@ export class BattleRoom extends DurableObject<Env> {
 			state.lockedCosts = [null, null];
 			state.rematch = [false, false];
 			this.addLog(state, `Player ${attachment.player} disconnected. Battle paused.`);
+			this.addEvent(state, { type: 'disconnect', player: attachment.player, round: 0, message: `Player ${attachment.player} disconnected.` });
 			await this.ctx.storage.put('state', state);
 		}
 

@@ -5,228 +5,71 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<title>Demonym Connect</title>
 		<style>
-			* {
-				box-sizing: border-box;
-			}
-			body {
-				margin: 0;
-				min-height: 100vh;
-				background: #111;
-				color: #fff;
-				font-family: monospace;
-				display: flex;
-				align-items: center;
-				justify-content: center;
-			}
-			main {
-				width: min(860px, calc(100% - 32px));
-				padding: 24px 0;
-			}
-			h1,
-			h2,
-			p {
-				margin-top: 0;
-			}
-			button,
-			input {
-				font: inherit;
-				padding: 10px 14px;
-			}
-			button {
-				cursor: pointer;
-			}
-			button:disabled {
-				cursor: not-allowed;
-				opacity: 0.45;
-			}
-			.lobby {
-				display: grid;
-				gap: 16px;
-			}
-			.join {
-				display: flex;
-				gap: 8px;
-			}
-			.join input {
-				flex: 1;
-				text-transform: uppercase;
-			}
-			#battle {
-				display: none;
-			}
-			.room,
-			#player-label {
-				margin-bottom: 12px;
-				opacity: 0.75;
-			}
-			.creatures {
-				display: grid;
-				grid-template-columns: 1fr 1fr;
-				gap: 16px;
-				margin: 24px 0;
-			}
-			.creature {
-				border: 1px solid #666;
-				padding: 18px;
-			}
-			.creature.you {
-				border-color: #fff;
-			}
-			.creature.active {
-				outline: 2px solid #fff;
-				outline-offset: 3px;
-			}
-			.creature-name {
-				font-size: 1.1rem;
-				margin: 10px 0 4px;
-			}
-			.stat {
-				margin-top: 8px;
-			}
-			.status-list {
-				min-height: 18px;
-				margin-top: 8px;
-				opacity: 0.8;
-				font-size: 0.86rem;
-			}
-			.ready-state {
-				margin-top: 12px;
-				opacity: 0.75;
-			}
-			#signal-toss {
-				min-height: 24px;
-				margin: 16px 0 6px;
-				letter-spacing: 0.04em;
-				opacity: 0.8;
-			}
-			.round-panel {
-				display: none;
-				grid-template-columns: 0.7fr 1fr 1.5fr;
-				gap: 12px;
-				margin: 12px 0 16px;
-				padding: 12px 14px;
-				border: 1px solid #444;
-			}
-			.round-panel .label {
-				display: block;
-				margin-bottom: 4px;
-				opacity: 0.55;
-				font-size: 0.75rem;
-			}
-			.round-panel strong {
-				display: block;
-			}
-			#status {
-				min-height: 24px;
-				margin: 16px 0;
-				font-weight: bold;
-			}
-			.result-panel {
-				display: none;
-				margin: 16px 0;
-				padding: 16px;
-				border: 1px solid #666;
-			}
-			.result-panel h2 {
-				margin-bottom: 8px;
-			}
-			.result-actions {
-				display: flex;
-				gap: 10px;
-				margin-top: 12px;
-			}
-			.result-actions button {
-				flex: 1;
-			}
-			#rematch-state {
-				margin-top: 10px;
-				opacity: 0.7;
-				font-size: 0.85rem;
-			}
-			.lineage-picker {
-				margin: 18px 0 12px;
-				padding: 14px;
-				border: 1px solid #444;
-			}
-			.lineage-picker label,
-			.lineage-picker small {
-				display: block;
-			}
-			.lineage-picker label {
-				margin-bottom: 8px;
-				font-weight: bold;
-			}
-			.lineage-picker select {
-				width: 100%;
-				padding: 10px 12px;
-				font: inherit;
-				background: #181818;
-				color: #fff;
-				border: 1px solid #666;
-			}
-			.lineage-picker small {
-				margin-top: 7px;
-				opacity: 0.6;
-			}
-			#ready {
-				width: 100%;
-				margin-bottom: 12px;
-				font-weight: bold;
-			}
-			#moves {
-				display: grid;
-				grid-template-columns: repeat(2, minmax(0, 1fr));
-				gap: 10px;
-			}
-			.move {
-				text-align: left;
-				min-height: 96px;
-			}
-			.move strong,
-			.move small {
-				display: block;
-			}
-			.move small {
-				margin-top: 4px;
-				opacity: 0.75;
-			}
-			.move .pressure {
-				opacity: 1;
-			}
-			.move.locked {
-				outline: 2px solid #fff;
-				outline-offset: -4px;
-			}
-			.move.recover {
-				grid-column: 1 / -1;
-				border-style: dashed;
-			}
-			.log {
-				margin-top: 24px;
-				border-top: 1px solid #444;
-				padding-top: 16px;
-			}
-			#battle-log {
-				margin: 0;
-				padding-left: 20px;
-				max-height: 230px;
-				overflow: auto;
-			}
-			#battle-log li {
-				margin-bottom: 6px;
-			}
-			.note {
-				margin-top: 18px;
-				opacity: 0.55;
-				font-size: 0.8rem;
-			}
-			@media (max-width: 600px) {
-				.creatures,
-				#moves,
-				.round-panel {
-					grid-template-columns: 1fr;
-				}
-			}
+			* { box-sizing: border-box; }
+			body { margin: 0; min-height: 100vh; background: #111; color: #fff; font-family: monospace; display: flex; align-items: center; justify-content: center; }
+			main { width: min(860px, calc(100% - 32px)); padding: 24px 0; }
+			h1, h2, p { margin-top: 0; }
+			button, input { font: inherit; padding: 10px 14px; }
+			button { cursor: pointer; }
+			button:disabled { cursor: not-allowed; opacity: 0.45; }
+			.lobby { display: grid; gap: 16px; }
+			.join { display: flex; gap: 8px; }
+			.join input { flex: 1; text-transform: uppercase; }
+			#battle { display: none; }
+			.room, #player-label { margin-bottom: 12px; opacity: 0.75; }
+			.creatures { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 24px 0; }
+			.creature { border: 1px solid #666; padding: 18px; }
+			.creature.you { border-color: #fff; }
+			.creature.active { outline: 2px solid #fff; outline-offset: 3px; }
+			.creature { transition: transform 120ms ease, border-color 120ms ease, background 120ms ease; }
+			.creature.event-act { animation: event-act 420ms ease; }
+			.creature.event-hit { animation: event-hit 420ms steps(2, end); }
+			.creature.event-lock { animation: event-lock 360ms ease; }
+			.creature.event-recover { animation: event-recover 520ms ease; }
+			.creature.event-status { animation: event-status 520ms ease; }
+			.creature.event-win { animation: event-win 800ms ease; }
+			.creature-name { font-size: 1.1rem; margin: 10px 0 4px; }
+			.stat { margin-top: 8px; }
+			.status-list { min-height: 18px; margin-top: 8px; opacity: 0.8; font-size: 0.86rem; }
+			.ready-state { margin-top: 12px; opacity: 0.75; }
+			#signal-toss { min-height: 24px; margin: 16px 0 6px; letter-spacing: 0.04em; opacity: 0.8; }
+			#battle-event { min-height: 42px; margin: 8px 0 12px; padding: 10px 12px; border: 1px solid #333; display: flex; align-items: center; font-weight: bold; letter-spacing: 0.06em; opacity: 0; transform: translateY(3px); transition: opacity 120ms ease, transform 120ms ease; }
+			#battle-event.show { opacity: 1; transform: translateY(0); }
+			#battle-event .event-prefix { opacity: 0.55; margin-right: 8px; }
+			.round-panel { display: none; grid-template-columns: 0.7fr 1fr 1.5fr; gap: 12px; margin: 12px 0 16px; padding: 12px 14px; border: 1px solid #444; }
+			.round-panel .label { display: block; margin-bottom: 4px; opacity: 0.55; font-size: 0.75rem; }
+			.round-panel strong { display: block; }
+			#status { min-height: 24px; margin: 16px 0; font-weight: bold; }
+			.result-panel { display: none; margin: 16px 0; padding: 16px; border: 1px solid #666; }
+			.result-panel h2 { margin-bottom: 8px; }
+			.result-actions { display: flex; gap: 10px; margin-top: 12px; }
+			.result-actions button { flex: 1; }
+			#rematch-state { margin-top: 10px; opacity: 0.7; font-size: 0.85rem; }
+			.lineage-picker { margin: 18px 0 12px; padding: 14px; border: 1px solid #444; }
+			.lineage-picker label, .lineage-picker small { display: block; }
+			.lineage-picker label { margin-bottom: 8px; font-weight: bold; }
+			.lineage-picker select { width: 100%; padding: 10px 12px; font: inherit; background: #181818; color: #fff; border: 1px solid #666; }
+			.lineage-picker small { margin-top: 7px; opacity: 0.6; }
+			#ready { width: 100%; margin-bottom: 12px; font-weight: bold; }
+			#moves { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+			.move { text-align: left; min-height: 96px; }
+			.move strong, .move small { display: block; }
+			.move small { margin-top: 4px; opacity: 0.75; }
+			.move .pressure { opacity: 1; }
+			.move.locked { outline: 2px solid #fff; outline-offset: -4px; }
+			.move.recover { grid-column: 1 / -1; border-style: dashed; }
+			.log { margin-top: 24px; border-top: 1px solid #444; padding-top: 16px; }
+			#battle-log { margin: 0; padding-left: 20px; max-height: 230px; overflow: auto; }
+			#battle-log li { margin-bottom: 6px; }
+			.note { margin-top: 18px; opacity: 0.55; font-size: 0.8rem; }
+			@keyframes event-act { 0% { transform: translateX(0); } 45% { transform: translateX(5px); border-color: #fff; } 100% { transform: translateX(0); } }
+			@keyframes event-hit { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-5px); background: #2a1717; } 50% { transform: translateX(5px); } 75% { transform: translateX(-3px); background: #111; } }
+			@keyframes event-lock { 0%, 100% { outline: 0 solid #fff; } 50% { outline: 3px solid #fff; outline-offset: -6px; } }
+			@keyframes event-recover { 0%, 100% { background: #111; } 50% { background: #17241d; border-color: #ddd; } }
+			@keyframes event-status { 0%, 100% { border-style: solid; } 35%, 70% { border-style: dashed; border-color: #fff; } }
+			@keyframes event-win { 0%, 100% { transform: scale(1); } 35% { transform: scale(1.015); outline: 3px double #fff; outline-offset: 4px; } }
+			@media (prefers-reduced-motion: reduce) { .creature, #battle-event { animation: none !important; transition: none !important; } }
+			@media (max-width: 600px) { .creatures, #moves, .round-panel { grid-template-columns: 1fr; } }
 		</style>
 	</head>
 	<body>
@@ -276,6 +119,7 @@
 				</div>
 
 				<div id="signal-toss"></div>
+				<div id="battle-event" aria-live="polite"></div>
 				<div id="round-panel" class="round-panel">
 					<div><span class="label">ROUND</span><strong id="round-number">-</strong></div>
 					<div><span class="label">RESOLVES FIRST</span><strong id="round-priority">-</strong></div>
@@ -299,15 +143,12 @@
 					<ol id="battle-log"></ol>
 				</div>
 
-				<div class="note">
-					v0.2.6 rematch-loop test build. Both players choose secretly, then the server resolves the two locked actions in priority order.
-					Recover remains a permanent fifth action. Finished battles can now be replayed in the same room after both players request a
-					rematch. Exact Cardputer balance values are still awaiting source sync.
-				</div>
+				<div class="note">v0.2.7 battle-protocol test build. Creature identity/loadout is now carried in a versioned Demonym battle payload, and the server emits battle events that drive lightweight UI feedback. Both players still choose secretly before server resolution. Exact Cardputer balance values are still awaiting source sync.</div>
 			</section>
 		</main>
 
 		<script>
+
 			const lobby = document.querySelector('#lobby');
 			const battle = document.querySelector('#battle');
 			const createButton = document.querySelector('#create');
@@ -320,6 +161,7 @@
 			const playerLabel = document.querySelector('#player-label');
 			const matchNumber = document.querySelector('#match-number');
 			const signalToss = document.querySelector('#signal-toss');
+			const battleEvent = document.querySelector('#battle-event');
 			const roundPanel = document.querySelector('#round-panel');
 			const roundNumber = document.querySelector('#round-number');
 			const roundPriority = document.querySelector('#round-priority');
@@ -342,6 +184,9 @@
 			let moveLibrary = {};
 			let lineageLibrary = {};
 			let battleConfig = { recoverEnergy: 2, energyRecoveryPerRound: 1 };
+			let battleProtocol = {};
+			let lastEventId = 0;
+			let eventQueue = Promise.resolve();
 
 			const statusNames = {
 				stagger: 'Stagger',
@@ -359,12 +204,101 @@
 				currentRoom.textContent = code;
 			}
 
-			function setText(id, value) {
-				document.querySelector(id).textContent = value;
-			}
+			function setText(id, value) { document.querySelector(id).textContent = value; }
 
 			function sendMessage(message) {
 				if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+			}
+
+
+			function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+			function cardForPlayer(player) {
+				return player === 1 ? player1Card : player2Card;
+			}
+
+			async function pulseCard(player, className, duration = 420) {
+				if (!player) return;
+				const card = cardForPlayer(player);
+				card.classList.remove(className);
+				void card.offsetWidth;
+				card.classList.add(className);
+				await sleep(duration);
+				card.classList.remove(className);
+			}
+
+			async function showBattleEvent(text, duration = 560) {
+				battleEvent.innerHTML = `<span class="event-prefix">//</span>${text}`;
+				battleEvent.classList.add('show');
+				await sleep(duration);
+				battleEvent.classList.remove('show');
+				await sleep(100);
+			}
+
+			function moveName(moveId) {
+				return moveLibrary[moveId]?.name ?? 'MOVE';
+			}
+
+			async function playBattleEvent(event) {
+				if (!event) return;
+
+				if (event.type === 'action_locked') {
+					await Promise.all([pulseCard(event.player, 'event-lock', 360), showBattleEvent(`PLAYER ${event.player} // MOVE LOCKED`, 360)]);
+					return;
+				}
+
+				if (event.type === 'signal_toss') {
+					await showBattleEvent(`SIGNAL TOSS // PLAYER ${event.player} PRIORITY`, 700);
+					return;
+				}
+
+				if (event.type === 'round_start') {
+					await showBattleEvent(`ROUND ${event.round} // LOCK IN`, 480);
+					return;
+				}
+
+				if (event.type === 'move_resolved') {
+					const amount = event.amount ? ` // ${event.amount} DMG` : '';
+					await Promise.all([
+						pulseCard(event.player, 'event-act'),
+						event.amount ? pulseCard(event.targetPlayer, 'event-hit') : Promise.resolve(),
+						showBattleEvent(`P${event.player} // ${moveName(event.moveId).toUpperCase()}${amount}`, 620),
+					]);
+					return;
+				}
+
+				if (event.type === 'move_missed') {
+					await Promise.all([pulseCard(event.player, 'event-act'), showBattleEvent(`P${event.player} // ${moveName(event.moveId).toUpperCase()} // MISS`, 560)]);
+					return;
+				}
+
+				if (event.type === 'recover') {
+					const source = event.moveId ? moveName(event.moveId).toUpperCase() : 'RECOVER';
+					await Promise.all([pulseCard(event.player, 'event-recover', 520), showBattleEvent(`P${event.player} // ${source} // +${event.amount ?? 0} EN`, 560)]);
+					return;
+				}
+
+				if (event.type === 'heal') {
+					await Promise.all([pulseCard(event.targetPlayer ?? event.player, 'event-recover', 520), showBattleEvent(`P${event.player} // ${moveName(event.moveId).toUpperCase()} // +${event.amount ?? 0} HP`, 560)]);
+					return;
+				}
+
+				if (event.type === 'status_applied') {
+					const label = statusNames[event.statusId] ?? event.statusId ?? 'STATUS';
+					await Promise.all([pulseCard(event.targetPlayer, 'event-status', 520), showBattleEvent(`P${event.targetPlayer} // ${String(label).toUpperCase()}`, 480)]);
+					return;
+				}
+
+				if (event.type === 'battle_end') {
+					await Promise.all([pulseCard(event.player, 'event-win', 800), showBattleEvent(`PLAYER ${event.player} WINS`, 800)]);
+				}
+			}
+
+			function queueBattleEvents(events) {
+				if (!events?.length) return;
+				eventQueue = eventQueue.then(async () => {
+					for (const event of events) await playBattleEvent(event);
+				});
 			}
 
 			function connectToRoom(code) {
@@ -378,9 +312,7 @@
 				const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
 				socket = new WebSocket(`${protocol}://${location.host}/api/rooms/${code}/ws`);
 
-				socket.addEventListener('open', () => {
-					status.textContent = 'Connected.';
-				});
+				socket.addEventListener('open', () => { status.textContent = 'Connected.'; });
 				socket.addEventListener('message', (event) => {
 					const message = JSON.parse(event.data);
 
@@ -391,6 +323,8 @@
 						moveLibrary = message.moveLibrary ?? {};
 						lineageLibrary = message.lineageLibrary ?? {};
 						battleConfig = message.battleConfig ?? battleConfig;
+						battleProtocol = message.battleProtocol ?? battleProtocol;
+						lastEventId = state.eventSeq ?? 0;
 						playerLabel.textContent = `You are Player ${playerNumber}`;
 						player1Card.classList.toggle('you', playerNumber === 1);
 						player2Card.classList.toggle('you', playerNumber === 2);
@@ -399,12 +333,17 @@
 					}
 
 					if (message.type === 'state') {
+						const previousEventId = lastEventId;
 						state = message.state;
 						connectedPlayers = message.connectedPlayers ?? [];
 						moveLibrary = message.moveLibrary ?? moveLibrary;
 						lineageLibrary = message.lineageLibrary ?? lineageLibrary;
 						battleConfig = message.battleConfig ?? battleConfig;
+						battleProtocol = message.battleProtocol ?? battleProtocol;
+						const newEvents = (state.events ?? []).filter((item) => item.id > previousEventId);
+						lastEventId = Math.max(previousEventId, state.eventSeq ?? previousEventId);
 						render();
+						queueBattleEvents(newEvents);
 						return;
 					}
 
@@ -426,12 +365,12 @@
 
 			function renderCreature(player) {
 				const creature = state.players[player - 1];
-				setText(`#name-${player}`, creature.name);
-				setText(`#lineage-${player}`, creature.lineage);
+				setText(`#name-${player}`, creature.payload.name);
+				setText(`#lineage-${player}`, creature.payload.lineage);
 				setText(`#hp-${player}`, creature.hp);
-				setText(`#max-hp-${player}`, creature.maxHp);
+				setText(`#max-hp-${player}`, creature.payload.stats.maxHp);
 				setText(`#energy-${player}`, creature.energy);
-				setText(`#max-energy-${player}`, creature.maxEnergy);
+				setText(`#max-energy-${player}`, creature.payload.stats.maxEnergy);
 				let readyLabel = state.ready[player - 1] ? 'Ready' : 'Not ready';
 				if (state.started && state.winner === null) {
 					readyLabel = state.lockedPlayers?.[player - 1] ? 'Move locked' : 'Choosing move';
@@ -471,7 +410,7 @@
 					}
 				}
 
-				lineageSelect.value = creature.lineage;
+				lineageSelect.value = creature.payload.lineage;
 				lineageSelect.disabled = state.started || state.ready[playerNumber - 1] || state.winner !== null;
 			}
 
@@ -484,7 +423,7 @@
 				const alreadyLocked = Boolean(state.lockedPlayers?.[playerNumber - 1]);
 				const canLock = state.started && state.winner === null && state.phase === 'selecting' && !alreadyLocked && bothConnected;
 
-				for (const moveId of creature.moves) {
+				for (const moveId of creature.payload.moveIds) {
 					const move = moveLibrary[moveId];
 					if (!move) continue;
 
@@ -580,8 +519,9 @@
 				const opponent = playerNumber === 1 ? 2 : 1;
 				const opponentLocked = Boolean(state.lockedPlayers?.[opponent - 1]);
 
-				signalToss.textContent =
-					state.started && state.initiativeWinner ? `SIGNAL TOSS: Player ${state.initiativeWinner} gets Round 1 priority.` : '';
+				signalToss.textContent = state.started && state.initiativeWinner
+					? `SIGNAL TOSS: Player ${state.initiativeWinner} gets Round 1 priority.`
+					: '';
 				renderRoundPanel(myLocked, opponentLocked, opponent);
 				renderResultPanel();
 				readyButton.disabled = !bothConnected || playerReady || state.winner !== null;
@@ -610,15 +550,11 @@
 					const response = await fetch('/api/rooms', { method: 'POST' });
 					const data = await response.json();
 					connectToRoom(data.code);
-				} finally {
-					createButton.disabled = false;
-				}
+				} finally { createButton.disabled = false; }
 			});
 
 			joinButton.addEventListener('click', () => connectToRoom(roomInput.value));
-			roomInput.addEventListener('keydown', (event) => {
-				if (event.key === 'Enter') connectToRoom(roomInput.value);
-			});
+			roomInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') connectToRoom(roomInput.value); });
 			lineageSelect.addEventListener('change', () => sendMessage({ type: 'select-lineage', lineage: lineageSelect.value }));
 			readyButton.addEventListener('click', () => sendMessage({ type: 'ready' }));
 			rematchButton.addEventListener('click', () => sendMessage({ type: 'rematch' }));
