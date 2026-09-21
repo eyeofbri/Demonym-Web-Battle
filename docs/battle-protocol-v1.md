@@ -134,12 +134,13 @@ The server first sends:
   "connectionProtocol": {
     "name": "demonym-connect",
     "version": 1,
-    "serverVersion": "0.2.9",
+    "serverVersion": "0.3.0",
     "requiredCapabilities": [
       "creature-payload-v1",
       "round-lock-v1",
       "battle-events-v1",
-      "recover-action-v1"
+      "recover-action-v1",
+      "session-resume-v1"
     ],
     "supportedClientTypes": ["web", "cardputer"]
   }
@@ -160,7 +161,8 @@ The client must answer with `client-hello`:
     "round-lock-v1",
     "battle-events-v1",
     "recover-action-v1",
-    "rematch-v1"
+    "rematch-v1",
+    "session-resume-v1"
   ]
 }
 ```
@@ -208,9 +210,83 @@ State messages now include `connectedClients` alongside `connectedPlayers`. Each
 {
   "player": 1,
   "clientType": "cardputer",
-  "clientVersion": "browser-mock-0.2.9",
+  "clientVersion": "browser-mock-0.3.0",
   "capabilities": ["..."]
 }
 ```
 
 This metadata is connection state, not creature state. A Cardputer client can theoretically battle using a server test creature, and a creature payload's `source` remains separate from the type of client connected to that player slot.
+
+## v0.3 resilient battle loop
+
+v0.3 keeps Demonym Connect protocol v1, but adds resumable player sessions and makes the browser treat the server event stream as a real playback phase rather than purely decorative feedback.
+
+### Session resume
+
+When a player first connects, the server creates an opaque session token for that player slot and includes it in `hello-required`:
+
+```json
+{
+  "type": "hello-required",
+  "player": 1,
+  "sessionToken": "opaque-session-token",
+  "resumed": false,
+  "reconnectGraceMs": 60000,
+  "connectionProtocol": { "...": "..." }
+}
+```
+
+The browser stores this token in `sessionStorage`, scoped to that tab and room. `sessionStorage` is intentional: two browser tabs can still represent two different players during testing, while a refresh or temporary socket drop in one tab can retain its own player identity.
+
+A reconnect sends the token as the WebSocket query parameter:
+
+```text
+/api/rooms/ABC123/ws?session=<opaque-session-token>
+```
+
+If the token matches a reserved player slot and that slot does not already have an active socket, the server resumes that player. The next `hello-required` and `hello-ack` messages include `resumed: true`.
+
+The resumed client receives the current authoritative state, including its already locked move when applicable. A dropped connection therefore does not immediately erase READY state, the current round, HP/Energy, statuses, or a locked action.
+
+The server allows a 60-second reconnect window. A disconnected player's session remains reserved during that window. If it expires, the token is released and the interrupted battle returns to pre-READY state so another client can take the open slot. The reconnect timeout is driven by a Durable Object alarm rather than by a browser timer.
+
+A client can also send:
+
+```json
+{ "type": "leave" }
+```
+
+This explicitly releases its session immediately. The current web UI uses this when `NEW ROOM` is selected.
+
+### New capability
+
+v0.3 clients advertise and the server requires:
+
+- `session-resume-v1` — understands the opaque player-session token and reconnection flow.
+
+The protocol remains `demonym-connect` version 1. This addition is represented as a required capability rather than a protocol-version bump.
+
+### Resolution playback lock
+
+The Durable Object still resolves both locked actions immediately and remains authoritative for the battle result. The browser now treats newly received battle events as a local playback queue.
+
+While that queue is playing:
+
+- all move buttons are disabled;
+- Recover is disabled;
+- the round panel displays a resolving state;
+- the result/rematch panel waits until the final battle event has played;
+- the next round cannot be selected from the standard web UI until the prior round's events finish.
+
+This is deliberately a **client presentation lock**, not a server delay. The server does not wait on animations or acknowledgements from either client. That avoids allowing a slow, backgrounded, or disconnected client to stall authoritative battle resolution.
+
+The future Cardputer client can use the same server event order with device-appropriate timing and animation while keeping the battle outcome synchronized.
+
+### Additional public events
+
+v0.3 adds:
+
+- `reconnect`
+- `session_expired`
+
+The existing `disconnect` event now means the player has temporarily lost its connection and is inside the reconnect window, rather than immediately meaning the match has been destroyed.

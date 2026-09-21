@@ -6,7 +6,7 @@ type Pressure = 'Neutral' | 'Force' | 'Signal' | 'Heat' | 'Corrosion' | 'Echo';
 type MoveRole = 'attack' | 'guard' | 'heal' | 'utility';
 type BattlePhase = 'waiting' | 'selecting' | 'finished';
 type StatusId = 'stagger' | 'disruption' | 'burn' | 'corrosion' | 'echo-interference' | 'evasion' | 'ward';
-type BattleEventType = 'lineage_selected' | 'creature_imported' | 'ready' | 'signal_toss' | 'round_start' | 'action_locked' | 'move_resolved' | 'move_missed' | 'recover' | 'status_applied' | 'heal' | 'battle_end' | 'rematch_requested' | 'rematch_started' | 'disconnect';
+type BattleEventType = 'lineage_selected' | 'creature_imported' | 'ready' | 'signal_toss' | 'round_start' | 'action_locked' | 'move_resolved' | 'move_missed' | 'recover' | 'status_applied' | 'heal' | 'battle_end' | 'rematch_requested' | 'rematch_started' | 'disconnect' | 'reconnect' | 'session_expired';
 type CreaturePayloadSource = 'web-test' | 'cardputer';
 type ClientType = 'web' | 'cardputer';
 
@@ -15,7 +15,8 @@ type ClientCapability =
 	| 'round-lock-v1'
 	| 'battle-events-v1'
 	| 'recover-action-v1'
-	| 'rematch-v1';
+	| 'rematch-v1'
+	| 'session-resume-v1';
 
 type MoveId =
 	| 'pulse-strike'
@@ -87,7 +88,7 @@ interface BattleEvent {
 }
 
 interface BattleState {
-	version: 11;
+	version: 12;
 	players: [CreatureState, CreatureState];
 	ready: [boolean, boolean];
 	started: boolean;
@@ -103,6 +104,8 @@ interface BattleState {
 	log: string[];
 	eventSeq: number;
 	events: BattleEvent[];
+	sessionTokens: [string | null, string | null];
+	disconnectDeadlines: [number | null, number | null];
 }
 
 interface ClientInfo {
@@ -114,6 +117,8 @@ interface ClientInfo {
 interface SocketAttachment {
 	player: PlayerNumber;
 	handshakeComplete: boolean;
+	sessionToken: string;
+	resumed: boolean;
 	clientInfo?: ClientInfo;
 }
 
@@ -337,6 +342,7 @@ const MAX_IMPORTED_NAME_LENGTH = 48;
 const MAX_IMPORTED_ID_LENGTH = 64;
 const MAX_IMPORTED_HP = 1000;
 const MAX_IMPORTED_ENERGY = 100;
+const RECONNECT_GRACE_MS = 60_000;
 
 const BATTLE_CONFIG = {
 	recoverEnergy: RECOVER_ENERGY,
@@ -348,12 +354,13 @@ const REQUIRED_CLIENT_CAPABILITIES: ClientCapability[] = [
 	'round-lock-v1',
 	'battle-events-v1',
 	'recover-action-v1',
+	'session-resume-v1',
 ];
 
 const CONNECTION_PROTOCOL = {
 	name: 'demonym-connect',
 	version: 1,
-	serverVersion: '0.2.9',
+	serverVersion: '0.3.0',
 	requiredCapabilities: REQUIRED_CLIENT_CAPABILITIES,
 	supportedClientTypes: ['web', 'cardputer'] as ClientType[],
 };
@@ -364,6 +371,8 @@ const BATTLE_PROTOCOL = {
 	creaturePayloadVersion: 1,
 	battleEventVersion: 1,
 	externalCreatureImport: true,
+	sessionResume: true,
+	reconnectGraceMs: RECONNECT_GRACE_MS,
 	connectionProtocol: CONNECTION_PROTOCOL,
 };
 
@@ -458,6 +467,12 @@ function pickStartingPlayer(): PlayerNumber {
 	return byte[0] % 2 === 0 ? 1 : 2;
 }
 
+function generateSessionToken(): string {
+	const bytes = new Uint8Array(18);
+	crypto.getRandomValues(bytes);
+	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 function randomPercent(): number {
 	const bytes = new Uint32Array(1);
 	crypto.getRandomValues(bytes);
@@ -466,7 +481,7 @@ function randomPercent(): number {
 
 function createInitialState(): BattleState {
 	return {
-		version: 11,
+		version: 12,
 		players: [createCreature(1), createCreature(2)],
 		ready: [false, false],
 		started: false,
@@ -482,6 +497,8 @@ function createInitialState(): BattleState {
 		log: ['Battle room created.'],
 		eventSeq: 0,
 		events: [],
+		sessionTokens: [null, null],
+		disconnectDeadlines: [null, null],
 	};
 }
 
@@ -574,7 +591,7 @@ export class BattleRoom extends DurableObject<Env> {
 	private async getState(): Promise<BattleState> {
 		const storedState = await this.ctx.storage.get<BattleState | { version?: number }>('state');
 
-		if (!storedState || storedState.version !== 11) {
+		if (!storedState || storedState.version !== 12) {
 			const state = createInitialState();
 			await this.ctx.storage.put('state', state);
 			return state;
@@ -648,7 +665,13 @@ export class BattleRoom extends DurableObject<Env> {
 	}
 
 	private stateForPlayer(state: BattleState, player: PlayerNumber) {
-		const { lockedMoves, lockedCosts: _lockedCosts, ...publicState } = state;
+		const {
+			lockedMoves,
+			lockedCosts: _lockedCosts,
+			sessionTokens: _sessionTokens,
+			disconnectDeadlines: _disconnectDeadlines,
+			...publicState
+		} = state;
 		return {
 			...publicState,
 			lockedPlayers: [lockedMoves[0] !== null, lockedMoves[1] !== null],
@@ -678,6 +701,43 @@ export class BattleRoom extends DurableObject<Env> {
 			if (!attachment?.player || !attachment.handshakeComplete) continue;
 			this.sendState(socket, state, attachment.player);
 		}
+	}
+
+	private async scheduleReconnectAlarm(state: BattleState) {
+		const deadlines = state.disconnectDeadlines.filter((value): value is number => typeof value === 'number');
+		if (!deadlines.length) {
+			await this.ctx.storage.deleteAlarm();
+			return;
+		}
+
+		await this.ctx.storage.setAlarm(Math.min(...deadlines));
+	}
+
+	private resetInterruptedBattle(state: BattleState, message: string) {
+		const player1Payload = structuredClone(state.players[0].payload);
+		const player2Payload = structuredClone(state.players[1].payload);
+		const completedMatch = state.winner !== null;
+
+		state.players = [createCreatureFromPayload(player1Payload), createCreatureFromPayload(player2Payload)];
+		state.ready = [false, false];
+		state.started = false;
+		state.phase = 'waiting';
+		state.round = 0;
+		state.roundFirstPlayer = null;
+		state.initiativeWinner = null;
+		state.winner = null;
+		state.lockedMoves = [null, null];
+		state.lockedCosts = [null, null];
+		state.rematch = [false, false];
+		if (completedMatch) state.matchNumber += 1;
+		this.addLog(state, message);
+	}
+
+	private async expirePlayerSession(state: BattleState, player: PlayerNumber, message: string) {
+		state.sessionTokens[player - 1] = null;
+		state.disconnectDeadlines[player - 1] = null;
+		this.resetInterruptedBattle(state, message);
+		this.addEvent(state, { type: 'session_expired', player, round: 0, message });
 	}
 
 	private resetForRematch(state: BattleState) {
@@ -759,6 +819,8 @@ export class BattleRoom extends DurableObject<Env> {
 		const updatedAttachment: SocketAttachment = {
 			player: attachment.player,
 			handshakeComplete: true,
+			sessionToken: attachment.sessionToken,
+			resumed: attachment.resumed,
 			clientInfo: result.info,
 		};
 		socket.serializeAttachment(updatedAttachment);
@@ -767,10 +829,18 @@ export class BattleRoom extends DurableObject<Env> {
 			type: 'hello-ack',
 			player: attachment.player,
 			client: result.info,
+			resumed: attachment.resumed,
 			connectionProtocol: CONNECTION_PROTOCOL,
 		});
 
 		const state = await this.getState();
+		state.disconnectDeadlines[attachment.player - 1] = null;
+		if (attachment.resumed) {
+			this.addLog(state, `Player ${attachment.player} reconnected and resumed their session.`);
+			this.addEvent(state, { type: 'reconnect', player: attachment.player, message: `Player ${attachment.player} reconnected.` });
+		}
+		await this.ctx.storage.put('state', state);
+		await this.scheduleReconnectAlarm(state);
 		this.sendState(socket, state, attachment.player, 'welcome');
 		await this.broadcastState(state);
 	}
@@ -1196,20 +1266,49 @@ export class BattleRoom extends DurableObject<Env> {
 			return new Response('Expected WebSocket', { status: 426 });
 		}
 
-		const existingSockets = this.ctx.getWebSockets();
-		if (existingSockets.length >= 2) return new Response('Battle room is full', { status: 409 });
-
+		const url = new URL(request.url);
+		const requestedSession = url.searchParams.get('session')?.trim() || null;
+		const state = await this.getState();
 		const reservedPlayers = this.getReservedPlayers();
-		const player: PlayerNumber = reservedPlayers.includes(1) ? 2 : 1;
+		let player: PlayerNumber | null = null;
+		let sessionToken = requestedSession;
+		let resumed = false;
+
+		if (requestedSession) {
+			const matchIndex = state.sessionTokens.findIndex((token) => token === requestedSession);
+			if (matchIndex >= 0) {
+				player = (matchIndex + 1) as PlayerNumber;
+				if (reservedPlayers.includes(player)) {
+					return new Response('That player session is already connected', { status: 409 });
+				}
+				resumed = true;
+			}
+		}
+
+		if (!player) {
+			const availableIndex = state.sessionTokens.findIndex((token, index) => token === null && !reservedPlayers.includes((index + 1) as PlayerNumber));
+			if (availableIndex < 0) return new Response('Battle room is full', { status: 409 });
+			player = (availableIndex + 1) as PlayerNumber;
+			sessionToken = generateSessionToken();
+			state.sessionTokens[availableIndex] = sessionToken;
+			state.disconnectDeadlines[availableIndex] = null;
+			await this.ctx.storage.put('state', state);
+		}
+
+		if (!sessionToken) return new Response('Unable to create player session', { status: 500 });
+
 		const pair = new WebSocketPair();
 		const [client, server] = Object.values(pair);
 
 		this.ctx.acceptWebSocket(server);
-		server.serializeAttachment({ player, handshakeComplete: false } satisfies SocketAttachment);
+		server.serializeAttachment({ player, handshakeComplete: false, sessionToken, resumed } satisfies SocketAttachment);
 
 		this.send(server, {
 			type: 'hello-required',
 			player,
+			sessionToken,
+			resumed,
+			reconnectGraceMs: RECONNECT_GRACE_MS,
 			connectionProtocol: CONNECTION_PROTOCOL,
 		});
 
@@ -1270,30 +1369,77 @@ export class BattleRoom extends DurableObject<Env> {
 			return;
 		}
 
+		if (data.type === 'leave') {
+			await this.handleLeave(socket, attachment);
+			return;
+		}
+
 		if (data.type === 'recover') await this.handleRecover(socket, attachment.player);
+	}
+
+	private async handleLeave(socket: WebSocket, attachment: SocketAttachment) {
+		const state = await this.getState();
+		if (state.sessionTokens[attachment.player - 1] === attachment.sessionToken) {
+			state.sessionTokens[attachment.player - 1] = null;
+			state.disconnectDeadlines[attachment.player - 1] = null;
+			this.resetInterruptedBattle(state, `Player ${attachment.player} left the battle room.`);
+			this.addEvent(state, { type: 'session_expired', player: attachment.player, round: 0, message: `Player ${attachment.player} left the battle room.` });
+			await this.ctx.storage.put('state', state);
+			await this.scheduleReconnectAlarm(state);
+			await this.broadcastState(state);
+		}
+		socket.close(1000, 'Player left room');
 	}
 
 	async webSocketClose(socket: WebSocket, _code: number, _reason: string, _wasClean: boolean) {
 		const attachment = socket.deserializeAttachment() as SocketAttachment | null;
-		const state = await this.getState();
+		if (!attachment?.player || !attachment.sessionToken) return;
 
-		if (attachment?.player && attachment.handshakeComplete && state.winner === null) {
-			state.ready[attachment.player - 1] = false;
-			state.started = false;
-			state.phase = 'waiting';
-			state.round = 0;
-			state.roundFirstPlayer = null;
-			state.initiativeWinner = null;
-			state.lockedMoves = [null, null];
-			state.lockedCosts = [null, null];
-			state.rematch = [false, false];
-			this.addLog(state, `Player ${attachment.player} disconnected. Battle paused.`);
-			this.addEvent(state, { type: 'disconnect', player: attachment.player, round: 0, message: `Player ${attachment.player} disconnected.` });
-			await this.ctx.storage.put('state', state);
+		const state = await this.getState();
+		if (state.sessionTokens[attachment.player - 1] !== attachment.sessionToken) {
+			await this.broadcastState(state);
+			return;
 		}
 
+		if (!attachment.handshakeComplete) {
+			state.sessionTokens[attachment.player - 1] = null;
+			state.disconnectDeadlines[attachment.player - 1] = null;
+			await this.ctx.storage.put('state', state);
+			await this.scheduleReconnectAlarm(state);
+			await this.broadcastState(state);
+			return;
+		}
+
+		state.disconnectDeadlines[attachment.player - 1] = Date.now() + RECONNECT_GRACE_MS;
+		this.addLog(state, `Player ${attachment.player} disconnected. Waiting up to ${RECONNECT_GRACE_MS / 1000} seconds for reconnection.`);
+		this.addEvent(state, { type: 'disconnect', player: attachment.player, message: `Player ${attachment.player} disconnected. Reconnect window started.` });
+		await this.ctx.storage.put('state', state);
+		await this.scheduleReconnectAlarm(state);
 		await this.broadcastState(state);
 	}
+
+	async alarm() {
+		const state = await this.getState();
+		const now = Date.now();
+		const expiredPlayers: PlayerNumber[] = [];
+
+		for (const player of [1, 2] as PlayerNumber[]) {
+			const deadline = state.disconnectDeadlines[player - 1];
+			if (deadline !== null && deadline <= now) expiredPlayers.push(player);
+		}
+
+		for (const player of expiredPlayers) {
+			await this.expirePlayerSession(state, player, `Player ${player}'s reconnect window expired. Battle reset.`);
+		}
+
+		if (expiredPlayers.length) {
+			await this.ctx.storage.put('state', state);
+			await this.broadcastState(state);
+		}
+
+		await this.scheduleReconnectAlarm(state);
+	}
+
 }
 
 function generateRoomCode(): string {

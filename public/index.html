@@ -321,6 +321,18 @@
 				grid-column: 1 / -1;
 				border-style: dashed;
 			}
+			#moves.playback-locked {
+				opacity: 0.55;
+			}
+			#moves.playback-locked::before {
+				content: 'RESOLVING ROUND...';
+				grid-column: 1 / -1;
+				padding: 8px 10px;
+				border: 1px solid #444;
+				font-size: 0.8rem;
+				letter-spacing: 0.08em;
+				opacity: 0.8;
+			}
 			.log {
 				margin-top: 24px;
 				border-top: 1px solid #444;
@@ -531,8 +543,8 @@
 				</div>
 
 				<div class="note">
-					v0.2.9 handshake test build. Every client must negotiate Demonym Connect protocol v1 and required capabilities before entering the
-					room. Cardputer creature imports are only accepted from a client that identified itself as Cardputer during that handshake.
+					v0.3 resilient battle-loop build. Battle controls stay locked while server-authored events play out, and a dropped WebSocket can
+					resume the same player session for up to 60 seconds.
 				</div>
 			</section>
 		</main>
@@ -587,8 +599,23 @@
 			let battleProtocol = {};
 			let lastEventId = 0;
 			let eventQueue = Promise.resolve();
+			let queuedEventCount = 0;
+			let eventPlaybackActive = false;
+			let activePlaybackRound = null;
+			let currentRoomCode = '';
+			let sessionToken = null;
+			let reconnectAttempts = 0;
+			let reconnectTimer = null;
+			let intentionalClose = false;
 
-			const CLIENT_CAPABILITIES = ['creature-payload-v1', 'round-lock-v1', 'battle-events-v1', 'recover-action-v1', 'rematch-v1'];
+			const CLIENT_CAPABILITIES = [
+				'creature-payload-v1',
+				'round-lock-v1',
+				'battle-events-v1',
+				'recover-action-v1',
+				'rematch-v1',
+				'session-resume-v1',
+			];
 
 			const statusNames = {
 				stagger: 'Stagger',
@@ -614,6 +641,24 @@
 				if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 			}
 
+			function sessionStorageKey(code) {
+				return `demonym-connect-session:${code}`;
+			}
+
+			function clearReconnectTimer() {
+				if (reconnectTimer) clearTimeout(reconnectTimer);
+				reconnectTimer = null;
+			}
+
+			function scheduleReconnect() {
+				if (intentionalClose || !currentRoomCode || !sessionToken) return;
+				clearReconnectTimer();
+				const delay = Math.min(5000, 750 * Math.max(1, reconnectAttempts + 1));
+				reconnectAttempts += 1;
+				status.textContent = `Connection lost. Reconnecting to Player ${playerNumber ?? '?'}...`;
+				reconnectTimer = setTimeout(() => connectToRoom(currentRoomCode, { reconnect: true }), delay);
+			}
+
 			function clientInfoForPlayer(player) {
 				return connectedClients.find((item) => item.player === player) ?? null;
 			}
@@ -625,7 +670,7 @@
 
 			function sendClientHello() {
 				if (!connectionProtocol) return;
-				const version = requestedClientType === 'cardputer' ? 'browser-mock-0.2.9' : 'web-0.2.9';
+				const version = requestedClientType === 'cardputer' ? 'browser-mock-0.3.0' : 'web-0.3.0';
 				sendMessage({
 					type: 'client-hello',
 					protocol: connectionProtocol.name,
@@ -668,6 +713,8 @@
 
 			async function playBattleEvent(event) {
 				if (!event) return;
+				activePlaybackRound = event.round ?? null;
+				render();
 
 				if (event.type === 'action_locked') {
 					await Promise.all([pulseCard(event.player, 'event-lock', 360), showBattleEvent(`PLAYER ${event.player} // MOVE LOCKED`, 360)]);
@@ -736,6 +783,21 @@
 					return;
 				}
 
+				if (event.type === 'disconnect') {
+					await showBattleEvent(`PLAYER ${event.player} // CONNECTION LOST`, 620);
+					return;
+				}
+
+				if (event.type === 'reconnect') {
+					await showBattleEvent(`PLAYER ${event.player} // RECONNECTED`, 620);
+					return;
+				}
+
+				if (event.type === 'session_expired') {
+					await showBattleEvent(`PLAYER ${event.player} // SESSION ENDED`, 620);
+					return;
+				}
+
 				if (event.type === 'battle_end') {
 					await Promise.all([pulseCard(event.player, 'event-win', 800), showBattleEvent(`PLAYER ${event.player} WINS`, 800)]);
 				}
@@ -743,17 +805,37 @@
 
 			function queueBattleEvents(events) {
 				if (!events?.length) return;
-				eventQueue = eventQueue.then(async () => {
-					for (const event of events) await playBattleEvent(event);
-				});
+				queuedEventCount += events.length;
+				eventPlaybackActive = true;
+				render();
+
+				eventQueue = eventQueue
+					.then(async () => {
+						for (const event of events) {
+							await playBattleEvent(event);
+							queuedEventCount = Math.max(0, queuedEventCount - 1);
+						}
+					})
+					.finally(() => {
+						if (queuedEventCount === 0) {
+							eventPlaybackActive = false;
+							activePlaybackRound = null;
+							render();
+						}
+					});
 			}
 
-			function connectToRoom(code) {
+			function connectToRoom(code, options = {}) {
 				code = code.trim().toUpperCase();
-				requestedClientType = clientModeSelect.value === 'cardputer' ? 'cardputer' : 'web';
+				const reconnecting = Boolean(options.reconnect);
+				if (!reconnecting) requestedClientType = clientModeSelect.value === 'cardputer' ? 'cardputer' : 'web';
 				handshakeComplete = false;
 				connectionProtocol = null;
 				connectedClients = [];
+				currentRoomCode = code;
+				intentionalClose = false;
+				if (!reconnecting) reconnectAttempts = 0;
+				sessionToken = sessionStorage.getItem(sessionStorageKey(code));
 				if (!/^[A-Z2-9]{6}$/.test(code)) {
 					alert('Enter a valid 6-character battle code.');
 					return;
@@ -761,7 +843,8 @@
 
 				showBattle(code);
 				const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-				socket = new WebSocket(`${protocol}://${location.host}/api/rooms/${code}/ws`);
+				const sessionQuery = sessionToken ? `?session=${encodeURIComponent(sessionToken)}` : '';
+				socket = new WebSocket(`${protocol}://${location.host}/api/rooms/${code}/ws${sessionQuery}`);
 
 				socket.addEventListener('open', () => {
 					status.textContent = 'Connected. Waiting for protocol handshake...';
@@ -772,6 +855,8 @@
 					if (message.type === 'hello-required') {
 						connectionProtocol = message.connectionProtocol;
 						playerNumber = message.player;
+						sessionToken = message.sessionToken ?? sessionToken;
+						if (sessionToken && currentRoomCode) sessionStorage.setItem(sessionStorageKey(currentRoomCode), sessionToken);
 						connectionMeta.textContent = `Handshake requested · ${connectionProtocol.name} v${connectionProtocol.version} · ${requestedClientType === 'cardputer' ? 'CARDPUTER MOCK' : 'WEB'}`;
 						status.textContent = 'Negotiating client capabilities...';
 						sendClientHello();
@@ -780,14 +865,18 @@
 
 					if (message.type === 'hello-ack') {
 						handshakeComplete = true;
+						reconnectAttempts = 0;
+						clearReconnectTimer();
 						connectionProtocol = message.connectionProtocol ?? connectionProtocol;
-						connectionMeta.textContent = `Handshake accepted · ${message.client.clientType.toUpperCase()} · ${message.client.clientVersion} · protocol v${connectionProtocol.version}`;
+						connectionMeta.textContent = `${message.resumed ? 'Session resumed' : 'Handshake accepted'} · ${message.client.clientType.toUpperCase()} · ${message.client.clientVersion} · protocol v${connectionProtocol.version}`;
 						status.textContent = 'Handshake accepted. Loading battle room...';
 						return;
 					}
 
 					if (message.type === 'hello-reject') {
 						handshakeComplete = false;
+						intentionalClose = true;
+						if (currentRoomCode) sessionStorage.removeItem(sessionStorageKey(currentRoomCode));
 						connectionMeta.textContent = 'Handshake rejected';
 						status.textContent = message.message ?? 'Handshake rejected.';
 						return;
@@ -821,8 +910,8 @@
 						battleProtocol = message.battleProtocol ?? battleProtocol;
 						const newEvents = (state.events ?? []).filter((item) => item.id > previousEventId);
 						lastEventId = Math.max(previousEventId, state.eventSeq ?? previousEventId);
-						render();
-						queueBattleEvents(newEvents);
+						if (newEvents.length) queueBattleEvents(newEvents);
+						else render();
 						return;
 					}
 
@@ -840,14 +929,16 @@
 				socket.addEventListener('close', () => {
 					handshakeComplete = false;
 					readyButton.disabled = true;
-					movesContainer.innerHTML = '';
-					status.textContent = 'Disconnected.';
+					if (intentionalClose) {
+						status.textContent = 'Disconnected.';
+						return;
+					}
+					scheduleReconnect();
 				});
 
 				socket.addEventListener('error', () => {
 					readyButton.disabled = true;
-					movesContainer.innerHTML = '';
-					status.textContent = 'Connection error.';
+					status.textContent = sessionToken ? 'Connection error. Reconnect will be attempted.' : 'Connection error.';
 				});
 			}
 
@@ -951,7 +1042,9 @@
 				const creature = state.players[playerNumber - 1];
 				const bothConnected = connectedPlayers.includes(1) && connectedPlayers.includes(2);
 				const alreadyLocked = Boolean(state.lockedPlayers?.[playerNumber - 1]);
-				const canLock = state.started && state.winner === null && state.phase === 'selecting' && !alreadyLocked && bothConnected;
+				const canLock =
+					state.started && state.winner === null && state.phase === 'selecting' && !alreadyLocked && bothConnected && !eventPlaybackActive;
+				movesContainer.classList.toggle('playback-locked', eventPlaybackActive && state.started && state.winner === null);
 
 				for (const moveId of creature.payload.moveIds) {
 					const move = moveLibrary[moveId];
@@ -993,10 +1086,12 @@
 				roundPanel.style.display = active ? 'grid' : 'none';
 				if (!active) return;
 
-				roundNumber.textContent = state.round;
-				roundPriority.textContent = `Player ${state.roundFirstPlayer}`;
+				roundNumber.textContent = eventPlaybackActive && activePlaybackRound ? activePlaybackRound : state.round;
+				roundPriority.textContent = eventPlaybackActive ? 'Resolving' : `Player ${state.roundFirstPlayer}`;
 
-				if (myLocked && opponentLocked) {
+				if (eventPlaybackActive) {
+					roundLockStatus.textContent = 'Moves locked · playing out';
+				} else if (myLocked && opponentLocked) {
 					roundLockStatus.textContent = 'Both locked · resolving';
 				} else if (myLocked) {
 					roundLockStatus.textContent = `You locked · Player ${opponent} choosing`;
@@ -1008,7 +1103,7 @@
 			}
 
 			function renderResultPanel() {
-				const finished = state.winner !== null;
+				const finished = state.winner !== null && !eventPlaybackActive;
 				resultPanel.style.display = finished ? 'block' : 'none';
 				if (!finished) return;
 
@@ -1058,9 +1153,11 @@
 					state.started && state.initiativeWinner ? `SIGNAL TOSS: Player ${state.initiativeWinner} gets Round 1 priority.` : '';
 				renderRoundPanel(myLocked, opponentLocked, opponent);
 				renderResultPanel();
-				readyButton.disabled = !bothConnected || playerReady || state.winner !== null;
+				readyButton.disabled = !bothConnected || playerReady || state.winner !== null || eventPlaybackActive;
 
-				if (state.winner !== null) {
+				if (eventPlaybackActive && state.started) {
+					status.textContent = `Resolving Round ${activePlaybackRound ?? state.round}... battle controls are locked.`;
+				} else if (state.winner !== null) {
 					status.textContent = state.winner === playerNumber ? 'You win.' : `Player ${state.winner} wins.`;
 				} else if (!bothConnected) {
 					status.textContent = 'Waiting for opponent...';
@@ -1118,8 +1215,15 @@
 			readyButton.addEventListener('click', () => sendMessage({ type: 'ready' }));
 			rematchButton.addEventListener('click', () => sendMessage({ type: 'rematch' }));
 			newBattleButton.addEventListener('click', () => {
-				if (socket) socket.close();
-				location.reload();
+				intentionalClose = true;
+				clearReconnectTimer();
+				if (currentRoomCode) sessionStorage.removeItem(sessionStorageKey(currentRoomCode));
+				if (socket?.readyState === WebSocket.OPEN) {
+					sendMessage({ type: 'leave' });
+					setTimeout(() => location.reload(), 120);
+				} else {
+					location.reload();
+				}
 			});
 		</script>
 	</body>
