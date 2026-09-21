@@ -99,6 +99,23 @@
 				letter-spacing: 0.04em;
 				opacity: 0.8;
 			}
+			.round-panel {
+				display: none;
+				grid-template-columns: 0.7fr 1fr 1.5fr;
+				gap: 12px;
+				margin: 12px 0 16px;
+				padding: 12px 14px;
+				border: 1px solid #444;
+			}
+			.round-panel .label {
+				display: block;
+				margin-bottom: 4px;
+				opacity: 0.55;
+				font-size: 0.75rem;
+			}
+			.round-panel strong {
+				display: block;
+			}
 			#status {
 				min-height: 24px;
 				margin: 16px 0;
@@ -160,6 +177,7 @@
 			}
 			.move.recover {
 				grid-column: 1 / -1;
+				border-style: dashed;
 			}
 			.log {
 				margin-top: 24px;
@@ -182,7 +200,8 @@
 			}
 			@media (max-width: 600px) {
 				.creatures,
-				#moves {
+				#moves,
+				.round-panel {
 					grid-template-columns: 1fr;
 				}
 			}
@@ -235,6 +254,11 @@
 				</div>
 
 				<div id="signal-toss"></div>
+				<div id="round-panel" class="round-panel">
+					<div><span class="label">ROUND</span><strong id="round-number">-</strong></div>
+					<div><span class="label">RESOLVES FIRST</span><strong id="round-priority">-</strong></div>
+					<div><span class="label">LOCK STATUS</span><strong id="round-lock-status">-</strong></div>
+				</div>
 				<div id="status">Connecting...</div>
 				<button id="ready" disabled>READY</button>
 				<div id="moves"></div>
@@ -245,9 +269,9 @@
 				</div>
 
 				<div class="note">
-					v0.2.4 round-lock test build. Both players choose secretly, then the server resolves the two locked moves in priority order.
-					Resolution priority alternates each round after the opening Signal Toss. Emergency Recover prevents Energy/status soft locks.
-					Exact Cardputer balance values are still awaiting source sync.
+					v0.2.5 permanent-Recover test build. Both players choose secretly, then the server resolves the two locked actions in priority
+					order. Recover is always available as a fifth battle action and restores Energy at the cost of the round. Exact Cardputer balance
+					values are still awaiting source sync.
 				</div>
 			</section>
 		</main>
@@ -264,6 +288,10 @@
 			const currentRoom = document.querySelector('#current-room');
 			const playerLabel = document.querySelector('#player-label');
 			const signalToss = document.querySelector('#signal-toss');
+			const roundPanel = document.querySelector('#round-panel');
+			const roundNumber = document.querySelector('#round-number');
+			const roundPriority = document.querySelector('#round-priority');
+			const roundLockStatus = document.querySelector('#round-lock-status');
 			const status = document.querySelector('#status');
 			const battleLog = document.querySelector('#battle-log');
 			const player1Card = document.querySelector('#player-1');
@@ -275,6 +303,7 @@
 			let state = null;
 			let moveLibrary = {};
 			let lineageLibrary = {};
+			let battleConfig = { recoverEnergy: 2, energyRecoveryPerRound: 1 };
 
 			const statusNames = {
 				stagger: 'Stagger',
@@ -323,6 +352,7 @@
 						connectedPlayers = message.connectedPlayers ?? [];
 						moveLibrary = message.moveLibrary ?? {};
 						lineageLibrary = message.lineageLibrary ?? {};
+						battleConfig = message.battleConfig ?? battleConfig;
 						playerLabel.textContent = `You are Player ${playerNumber}`;
 						player1Card.classList.toggle('you', playerNumber === 1);
 						player2Card.classList.toggle('you', playerNumber === 2);
@@ -335,6 +365,7 @@
 						connectedPlayers = message.connectedPlayers ?? [];
 						moveLibrary = message.moveLibrary ?? moveLibrary;
 						lineageLibrary = message.lineageLibrary ?? lineageLibrary;
+						battleConfig = message.battleConfig ?? battleConfig;
 						render();
 						return;
 					}
@@ -412,7 +443,6 @@
 				const bothConnected = connectedPlayers.includes(1) && connectedPlayers.includes(2);
 				const alreadyLocked = Boolean(state.lockedPlayers?.[playerNumber - 1]);
 				const canLock = state.started && state.winner === null && state.phase === 'selecting' && !alreadyLocked && bothConnected;
-				let affordableCount = 0;
 
 				for (const moveId of creature.moves) {
 					const move = moveLibrary[moveId];
@@ -420,7 +450,6 @@
 
 					const cost = currentMoveCost(creature, move);
 					const affordable = creature.energy >= cost;
-					if (affordable) affordableCount += 1;
 
 					const button = document.createElement('button');
 					button.className = 'move';
@@ -431,16 +460,13 @@
 					movesContainer.append(button);
 				}
 
-				const showRecover = (canLock && affordableCount === 0) || state.yourLockedMoveId === 'recover';
-				if (showRecover) {
-					const button = document.createElement('button');
-					button.className = 'move recover';
-					if (state.yourLockedMoveId === 'recover') button.classList.add('locked');
-					button.disabled = !canLock;
-					button.innerHTML = `<strong>Recover${state.yourLockedMoveId === 'recover' ? ' · LOCKED' : ''}</strong><small class="pressure">UTILITY · 0 EN</small><small>No move is affordable. Recover Energy and stay in the round.</small>`;
-					button.addEventListener('click', () => sendMessage({ type: 'recover' }));
-					movesContainer.append(button);
-				}
+				const recoverButton = document.createElement('button');
+				recoverButton.className = 'move recover';
+				if (state.yourLockedMoveId === 'recover') recoverButton.classList.add('locked');
+				recoverButton.disabled = !canLock;
+				recoverButton.innerHTML = `<strong>Recover${state.yourLockedMoveId === 'recover' ? ' · LOCKED' : ''}</strong><small class="pressure">UTILITY · 0 EN</small><small>Restore up to ${battleConfig.recoverEnergy} Energy. Uses this round's action.</small>`;
+				recoverButton.addEventListener('click', () => sendMessage({ type: 'recover' }));
+				movesContainer.append(recoverButton);
 			}
 
 			function renderLog() {
@@ -451,6 +477,25 @@
 					battleLog.append(item);
 				}
 				battleLog.scrollTop = battleLog.scrollHeight;
+			}
+
+			function renderRoundPanel(myLocked, opponentLocked, opponent) {
+				const active = state.started && state.winner === null && state.round > 0;
+				roundPanel.style.display = active ? 'grid' : 'none';
+				if (!active) return;
+
+				roundNumber.textContent = state.round;
+				roundPriority.textContent = `Player ${state.roundFirstPlayer}`;
+
+				if (myLocked && opponentLocked) {
+					roundLockStatus.textContent = 'Both locked · resolving';
+				} else if (myLocked) {
+					roundLockStatus.textContent = `You locked · Player ${opponent} choosing`;
+				} else if (opponentLocked) {
+					roundLockStatus.textContent = `You choosing · Player ${opponent} locked`;
+				} else {
+					roundLockStatus.textContent = 'Both choosing';
+				}
 			}
 
 			function render() {
@@ -469,9 +514,8 @@
 				const opponentLocked = Boolean(state.lockedPlayers?.[opponent - 1]);
 
 				signalToss.textContent =
-					state.started && state.initiativeWinner
-						? `SIGNAL TOSS: Player ${state.initiativeWinner} gets Round 1 priority. Round ${state.round}: Player ${state.roundFirstPlayer} resolves first.`
-						: '';
+					state.started && state.initiativeWinner ? `SIGNAL TOSS: Player ${state.initiativeWinner} gets Round 1 priority.` : '';
+				renderRoundPanel(myLocked, opponentLocked, opponent);
 				readyButton.disabled = !bothConnected || playerReady || state.winner !== null;
 
 				if (state.winner !== null) {

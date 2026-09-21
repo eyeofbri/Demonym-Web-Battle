@@ -55,7 +55,7 @@ interface CreatureState {
 }
 
 interface BattleState {
-	version: 6;
+	version: 7;
 	players: [CreatureState, CreatureState];
 	ready: [boolean, boolean];
 	started: boolean;
@@ -275,13 +275,18 @@ const STARTING_HP = 100;
 const STARTING_ENERGY = 7;
 const MAX_ENERGY = 10;
 const ENERGY_RECOVERY_PER_ROUND = 1;
-const EMERGENCY_RECOVER_ENERGY = 2;
+const RECOVER_ENERGY = 2;
 const MAX_LOG_ENTRIES = 24;
 const DISRUPTION_EXTRA_COST = 2;
 const WARD_DAMAGE_REDUCTION = 0.5;
 const EVASION_BONUS = 20;
 const BURN_DAMAGE = 4;
 const CORROSION_DAMAGE_MULTIPLIER = 1.2;
+
+const BATTLE_CONFIG = {
+	recoverEnergy: RECOVER_ENERGY,
+	energyRecoveryPerRound: ENERGY_RECOVERY_PER_ROUND,
+};
 
 function createCreature(player: PlayerNumber, lineage?: Lineage): CreatureState {
 	const selectedLineage: Lineage = lineage ?? (player === 1 ? 'Husk' : 'Wisp');
@@ -314,7 +319,7 @@ function randomPercent(): number {
 
 function createInitialState(): BattleState {
 	return {
-		version: 6,
+		version: 7,
 		players: [createCreature(1), createCreature(2)],
 		ready: [false, false],
 		started: false,
@@ -409,12 +414,6 @@ function otherPlayer(player: PlayerNumber): PlayerNumber {
 	return player === 1 ? 2 : 1;
 }
 
-function affordableMoves(creature: CreatureState): MoveId[] {
-	return creature.moves.filter((moveId) => {
-		const move = MOVE_LIBRARY[moveId];
-		return creature.energy >= effectiveEnergyCost(creature, move);
-	});
-}
 
 function isOffensiveMove(move: MoveDefinition): boolean {
 	return move.role === 'attack' || (move.role === 'utility' && move.power > 0);
@@ -424,7 +423,7 @@ export class BattleRoom extends DurableObject<Env> {
 	private async getState(): Promise<BattleState> {
 		const storedState = await this.ctx.storage.get<BattleState | { version?: number }>('state');
 
-		if (!storedState || storedState.version !== 6) {
+		if (!storedState || storedState.version !== 7) {
 			const state = createInitialState();
 			await this.ctx.storage.put('state', state);
 			return state;
@@ -482,6 +481,7 @@ export class BattleRoom extends DurableObject<Env> {
 			connectedPlayers: this.getConnectedPlayers(),
 			moveLibrary: MOVE_LIBRARY,
 			lineageLibrary: LINEAGE_LIBRARY,
+			battleConfig: BATTLE_CONFIG,
 		});
 	}
 
@@ -669,8 +669,8 @@ export class BattleRoom extends DurableObject<Env> {
 
 		if (action === 'recover') {
 			const before = attacker.energy;
-			attacker.energy = Math.min(attacker.maxEnergy, attacker.energy + EMERGENCY_RECOVER_ENERGY);
-			this.addLog(state, `Player ${player} recovered ${attacker.energy - before} Energy.`);
+			attacker.energy = Math.min(attacker.maxEnergy, attacker.energy + RECOVER_ENERGY);
+			this.addLog(state, `Player ${player} used Recover and restored ${attacker.energy - before} Energy.`);
 			return;
 		}
 
@@ -817,12 +817,6 @@ export class BattleRoom extends DurableObject<Env> {
 
 		if (state.lockedMoves[player - 1] !== null) {
 			this.send(socket, { type: 'error', message: 'Your move is already locked for this round.' });
-			return;
-		}
-
-		const creature = state.players[player - 1];
-		if (affordableMoves(creature).length > 0) {
-			this.send(socket, { type: 'error', message: 'Recover is only available when no moves can be afforded.' });
 			return;
 		}
 
