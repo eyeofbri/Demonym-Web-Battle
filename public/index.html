@@ -543,8 +543,8 @@
 				</div>
 
 				<div class="note">
-					v0.3 resilient battle-loop build. Battle controls stay locked while server-authored events play out, and a dropped WebSocket can
-					resume the same player session for up to 60 seconds.
+					v0.3.1 reconnect hotfix. Battle controls stay locked while server-authored events play out, and a dropped WebSocket can resume the
+					same player session for up to 60 seconds.
 				</div>
 			</section>
 		</main>
@@ -641,8 +641,14 @@
 				if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 			}
 
+			const ACTIVE_ROOM_KEY = 'demonym-connect-active-room';
+
 			function sessionStorageKey(code) {
 				return `demonym-connect-session:${code}`;
+			}
+
+			function clientModeStorageKey(code) {
+				return `demonym-connect-client-mode:${code}`;
 			}
 
 			function clearReconnectTimer() {
@@ -670,7 +676,7 @@
 
 			function sendClientHello() {
 				if (!connectionProtocol) return;
-				const version = requestedClientType === 'cardputer' ? 'browser-mock-0.3.0' : 'web-0.3.0';
+				const version = requestedClientType === 'cardputer' ? 'browser-mock-0.3.1' : 'web-0.3.1';
 				sendMessage({
 					type: 'client-hello',
 					protocol: connectionProtocol.name,
@@ -794,7 +800,7 @@
 				}
 
 				if (event.type === 'session_expired') {
-					await showBattleEvent(`PLAYER ${event.player} // SESSION ENDED`, 620);
+					await showBattleEvent(`PLAYER ${event.player} // SESSION EXPIRED · ROOM OPEN`, 700);
 					return;
 				}
 
@@ -828,28 +834,40 @@
 			function connectToRoom(code, options = {}) {
 				code = code.trim().toUpperCase();
 				const reconnecting = Boolean(options.reconnect);
-				if (!reconnecting) requestedClientType = clientModeSelect.value === 'cardputer' ? 'cardputer' : 'web';
-				handshakeComplete = false;
-				connectionProtocol = null;
-				connectedClients = [];
-				currentRoomCode = code;
-				intentionalClose = false;
-				if (!reconnecting) reconnectAttempts = 0;
-				sessionToken = sessionStorage.getItem(sessionStorageKey(code));
 				if (!/^[A-Z2-9]{6}$/.test(code)) {
 					alert('Enter a valid 6-character battle code.');
 					return;
 				}
 
+				if (!reconnecting) {
+					requestedClientType = clientModeSelect.value === 'cardputer' ? 'cardputer' : 'web';
+					reconnectAttempts = 0;
+					sessionStorage.setItem(clientModeStorageKey(code), requestedClientType);
+				} else {
+					const storedMode = sessionStorage.getItem(clientModeStorageKey(code));
+					if (storedMode === 'cardputer' || storedMode === 'web') requestedClientType = storedMode;
+				}
+
+				handshakeComplete = false;
+				connectionProtocol = null;
+				connectedClients = [];
+				currentRoomCode = code;
+				intentionalClose = false;
+				sessionToken = sessionStorage.getItem(sessionStorageKey(code));
+				sessionStorage.setItem(ACTIVE_ROOM_KEY, code);
+
 				showBattle(code);
 				const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
 				const sessionQuery = sessionToken ? `?session=${encodeURIComponent(sessionToken)}` : '';
-				socket = new WebSocket(`${protocol}://${location.host}/api/rooms/${code}/ws${sessionQuery}`);
+				const ws = new WebSocket(`${protocol}://${location.host}/api/rooms/${code}/ws${sessionQuery}`);
+				socket = ws;
 
-				socket.addEventListener('open', () => {
+				ws.addEventListener('open', () => {
+					if (socket !== ws) return;
 					status.textContent = 'Connected. Waiting for protocol handshake...';
 				});
-				socket.addEventListener('message', (event) => {
+				ws.addEventListener('message', (event) => {
+					if (socket !== ws) return;
 					const message = JSON.parse(event.data);
 
 					if (message.type === 'hello-required') {
@@ -876,7 +894,11 @@
 					if (message.type === 'hello-reject') {
 						handshakeComplete = false;
 						intentionalClose = true;
-						if (currentRoomCode) sessionStorage.removeItem(sessionStorageKey(currentRoomCode));
+						if (currentRoomCode) {
+							sessionStorage.removeItem(sessionStorageKey(currentRoomCode));
+							sessionStorage.removeItem(clientModeStorageKey(currentRoomCode));
+						}
+						sessionStorage.removeItem(ACTIVE_ROOM_KEY);
 						connectionMeta.textContent = 'Handshake rejected';
 						status.textContent = message.message ?? 'Handshake rejected.';
 						return;
@@ -892,6 +914,8 @@
 						battleConfig = message.battleConfig ?? battleConfig;
 						battleProtocol = message.battleProtocol ?? battleProtocol;
 						lastEventId = state.eventSeq ?? 0;
+						sessionStorage.setItem(ACTIVE_ROOM_KEY, currentRoomCode);
+						sessionStorage.setItem(clientModeStorageKey(currentRoomCode), requestedClientType);
 						playerLabel.textContent = `You are Player ${playerNumber} · ${requestedClientType === 'cardputer' ? 'Cardputer Mock' : 'Web Browser'}`;
 						player1Card.classList.toggle('you', playerNumber === 1);
 						player2Card.classList.toggle('you', playerNumber === 2);
@@ -926,7 +950,8 @@
 					}
 				});
 
-				socket.addEventListener('close', () => {
+				ws.addEventListener('close', (event) => {
+					if (socket !== ws || event.code === 4001) return;
 					handshakeComplete = false;
 					readyButton.disabled = true;
 					if (intentionalClose) {
@@ -936,7 +961,8 @@
 					scheduleReconnect();
 				});
 
-				socket.addEventListener('error', () => {
+				ws.addEventListener('error', () => {
+					if (socket !== ws) return;
 					readyButton.disabled = true;
 					status.textContent = sessionToken ? 'Connection error. Reconnect will be attempted.' : 'Connection error.';
 				});
@@ -1217,7 +1243,11 @@
 			newBattleButton.addEventListener('click', () => {
 				intentionalClose = true;
 				clearReconnectTimer();
-				if (currentRoomCode) sessionStorage.removeItem(sessionStorageKey(currentRoomCode));
+				sessionStorage.removeItem(ACTIVE_ROOM_KEY);
+				if (currentRoomCode) {
+					sessionStorage.removeItem(sessionStorageKey(currentRoomCode));
+					sessionStorage.removeItem(clientModeStorageKey(currentRoomCode));
+				}
 				if (socket?.readyState === WebSocket.OPEN) {
 					sendMessage({ type: 'leave' });
 					setTimeout(() => location.reload(), 120);
@@ -1225,6 +1255,16 @@
 					location.reload();
 				}
 			});
+
+			// A normal page refresh should return this tab to its active battle
+			// automatically. sessionStorage keeps this scoped to the current tab.
+			const resumeRoomCode = sessionStorage.getItem(ACTIVE_ROOM_KEY);
+			if (resumeRoomCode && /^[A-Z2-9]{6}$/.test(resumeRoomCode) && sessionStorage.getItem(sessionStorageKey(resumeRoomCode))) {
+				const storedMode = sessionStorage.getItem(clientModeStorageKey(resumeRoomCode));
+				requestedClientType = storedMode === 'cardputer' ? 'cardputer' : 'web';
+				clientModeSelect.value = requestedClientType;
+				connectToRoom(resumeRoomCode, { reconnect: true });
+			}
 		</script>
 	</body>
 </html>

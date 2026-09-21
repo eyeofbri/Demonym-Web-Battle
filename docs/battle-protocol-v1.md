@@ -290,3 +290,15 @@ v0.3 adds:
 - `session_expired`
 
 The existing `disconnect` event now means the player has temporarily lost its connection and is inside the reconnect window, rather than immediately meaning the match has been destroyed.
+
+## v0.3.1 reconnect behavior
+
+The v0.3.1 hotfix tightens session resume semantics without changing the public protocol version.
+
+- A reconnect using the same valid session token replaces the older socket generation for that player.
+- Close events from superseded sockets are ignored, preventing a refresh race from starting a false disconnect timer after the replacement connection is already active.
+- The web test client stores the active room code and client mode in `sessionStorage`, so refreshing the page automatically attempts to resume the same player slot instead of returning to the lobby.
+- The 60-second reconnect grace period still preserves the current battle state, including locked actions.
+- If the reconnect window expires, the missing player's slot is released and the interrupted match resets to the pre-ready state. The remaining player stays in the room and may wait for a new opponent to join using the same battle code.
+
+The last behavior is intentional: session expiry resets the interrupted battle; it does not eject the player who remained connected.

@@ -88,7 +88,7 @@ interface BattleEvent {
 }
 
 interface BattleState {
-	version: 12;
+	version: 13;
 	players: [CreatureState, CreatureState];
 	ready: [boolean, boolean];
 	started: boolean;
@@ -106,6 +106,7 @@ interface BattleState {
 	events: BattleEvent[];
 	sessionTokens: [string | null, string | null];
 	disconnectDeadlines: [number | null, number | null];
+	connectionIds: [string | null, string | null];
 }
 
 interface ClientInfo {
@@ -120,6 +121,7 @@ interface SocketAttachment {
 	sessionToken: string;
 	resumed: boolean;
 	clientInfo?: ClientInfo;
+	connectionId: string;
 }
 
 interface ClientMessage {
@@ -481,7 +483,7 @@ function randomPercent(): number {
 
 function createInitialState(): BattleState {
 	return {
-		version: 12,
+		version: 13,
 		players: [createCreature(1), createCreature(2)],
 		ready: [false, false],
 		started: false,
@@ -499,6 +501,7 @@ function createInitialState(): BattleState {
 		events: [],
 		sessionTokens: [null, null],
 		disconnectDeadlines: [null, null],
+		connectionIds: [null, null],
 	};
 }
 
@@ -591,7 +594,7 @@ export class BattleRoom extends DurableObject<Env> {
 	private async getState(): Promise<BattleState> {
 		const storedState = await this.ctx.storage.get<BattleState | { version?: number }>('state');
 
-		if (!storedState || storedState.version !== 12) {
+		if (!storedState || storedState.version !== 13) {
 			const state = createInitialState();
 			await this.ctx.storage.put('state', state);
 			return state;
@@ -670,6 +673,7 @@ export class BattleRoom extends DurableObject<Env> {
 			lockedCosts: _lockedCosts,
 			sessionTokens: _sessionTokens,
 			disconnectDeadlines: _disconnectDeadlines,
+			connectionIds: _connectionIds,
 			...publicState
 		} = state;
 		return {
@@ -736,6 +740,7 @@ export class BattleRoom extends DurableObject<Env> {
 	private async expirePlayerSession(state: BattleState, player: PlayerNumber, message: string) {
 		state.sessionTokens[player - 1] = null;
 		state.disconnectDeadlines[player - 1] = null;
+		state.connectionIds[player - 1] = null;
 		this.resetInterruptedBattle(state, message);
 		this.addEvent(state, { type: 'session_expired', player, round: 0, message });
 	}
@@ -822,6 +827,7 @@ export class BattleRoom extends DurableObject<Env> {
 			sessionToken: attachment.sessionToken,
 			resumed: attachment.resumed,
 			clientInfo: result.info,
+			connectionId: attachment.connectionId,
 		};
 		socket.serializeAttachment(updatedAttachment);
 
@@ -1278,9 +1284,6 @@ export class BattleRoom extends DurableObject<Env> {
 			const matchIndex = state.sessionTokens.findIndex((token) => token === requestedSession);
 			if (matchIndex >= 0) {
 				player = (matchIndex + 1) as PlayerNumber;
-				if (reservedPlayers.includes(player)) {
-					return new Response('That player session is already connected', { status: 409 });
-				}
 				resumed = true;
 			}
 		}
@@ -1291,17 +1294,33 @@ export class BattleRoom extends DurableObject<Env> {
 			player = (availableIndex + 1) as PlayerNumber;
 			sessionToken = generateSessionToken();
 			state.sessionTokens[availableIndex] = sessionToken;
-			state.disconnectDeadlines[availableIndex] = null;
-			await this.ctx.storage.put('state', state);
 		}
 
 		if (!sessionToken) return new Response('Unable to create player session', { status: 500 });
+
+		// Every socket connection gets its own generation id. A resumed connection
+		// replaces the previous generation before that old socket can report a
+		// disconnect, preventing a refresh/reconnect race from pausing the room.
+		const connectionId = generateSessionToken();
+		state.connectionIds[player - 1] = connectionId;
+		state.disconnectDeadlines[player - 1] = null;
+		await this.ctx.storage.put('state', state);
 
 		const pair = new WebSocketPair();
 		const [client, server] = Object.values(pair);
 
 		this.ctx.acceptWebSocket(server);
-		server.serializeAttachment({ player, handshakeComplete: false, sessionToken, resumed } satisfies SocketAttachment);
+		server.serializeAttachment({ player, handshakeComplete: false, sessionToken, resumed, connectionId } satisfies SocketAttachment);
+
+		if (resumed) {
+			for (const existingSocket of this.ctx.getWebSockets()) {
+				if (existingSocket === server) continue;
+				const existingAttachment = existingSocket.deserializeAttachment() as SocketAttachment | null;
+				if (existingAttachment?.player === player && existingAttachment.sessionToken === sessionToken) {
+					existingSocket.close(4001, 'Session resumed by a newer connection');
+				}
+			}
+		}
 
 		this.send(server, {
 			type: 'hello-required',
@@ -1379,9 +1398,13 @@ export class BattleRoom extends DurableObject<Env> {
 
 	private async handleLeave(socket: WebSocket, attachment: SocketAttachment) {
 		const state = await this.getState();
-		if (state.sessionTokens[attachment.player - 1] === attachment.sessionToken) {
+		if (
+			state.sessionTokens[attachment.player - 1] === attachment.sessionToken &&
+			state.connectionIds[attachment.player - 1] === attachment.connectionId
+		) {
 			state.sessionTokens[attachment.player - 1] = null;
 			state.disconnectDeadlines[attachment.player - 1] = null;
+			state.connectionIds[attachment.player - 1] = null;
 			this.resetInterruptedBattle(state, `Player ${attachment.player} left the battle room.`);
 			this.addEvent(state, { type: 'session_expired', player: attachment.player, round: 0, message: `Player ${attachment.player} left the battle room.` });
 			await this.ctx.storage.put('state', state);
@@ -1401,9 +1424,18 @@ export class BattleRoom extends DurableObject<Env> {
 			return;
 		}
 
+		// Ignore the close event from an older socket generation after a refresh
+		// or reconnect has already replaced it. Only the currently active
+		// connection is allowed to start the reconnect grace timer.
+		if (state.connectionIds[attachment.player - 1] !== attachment.connectionId) {
+			await this.broadcastState(state);
+			return;
+		}
+
 		if (!attachment.handshakeComplete) {
 			state.sessionTokens[attachment.player - 1] = null;
 			state.disconnectDeadlines[attachment.player - 1] = null;
+			state.connectionIds[attachment.player - 1] = null;
 			await this.ctx.storage.put('state', state);
 			await this.scheduleReconnectAlarm(state);
 			await this.broadcastState(state);
