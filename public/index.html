@@ -121,6 +121,28 @@
 				margin: 16px 0;
 				font-weight: bold;
 			}
+			.result-panel {
+				display: none;
+				margin: 16px 0;
+				padding: 16px;
+				border: 1px solid #666;
+			}
+			.result-panel h2 {
+				margin-bottom: 8px;
+			}
+			.result-actions {
+				display: flex;
+				gap: 10px;
+				margin-top: 12px;
+			}
+			.result-actions button {
+				flex: 1;
+			}
+			#rematch-state {
+				margin-top: 10px;
+				opacity: 0.7;
+				font-size: 0.85rem;
+			}
 			.lineage-picker {
 				margin: 18px 0 12px;
 				padding: 14px;
@@ -222,7 +244,7 @@
 
 			<section id="battle">
 				<h1>DEMONYM CONNECT</h1>
-				<div class="room">Battle Code: <strong id="current-room"></strong></div>
+				<div class="room">Battle Code: <strong id="current-room"></strong> · Match <strong id="match-number">1</strong></div>
 				<div id="player-label">Connecting...</div>
 
 				<div class="creatures">
@@ -259,6 +281,15 @@
 					<div><span class="label">RESOLVES FIRST</span><strong id="round-priority">-</strong></div>
 					<div><span class="label">LOCK STATUS</span><strong id="round-lock-status">-</strong></div>
 				</div>
+				<div id="result-panel" class="result-panel">
+					<h2 id="result-title">BATTLE COMPLETE</h2>
+					<div id="result-copy"></div>
+					<div class="result-actions">
+						<button id="rematch">REMATCH</button>
+						<button id="new-battle">NEW ROOM</button>
+					</div>
+					<div id="rematch-state"></div>
+				</div>
 				<div id="status">Connecting...</div>
 				<button id="ready" disabled>READY</button>
 				<div id="moves"></div>
@@ -269,9 +300,9 @@
 				</div>
 
 				<div class="note">
-					v0.2.5 permanent-Recover test build. Both players choose secretly, then the server resolves the two locked actions in priority
-					order. Recover is always available as a fifth battle action and restores Energy at the cost of the round. Exact Cardputer balance
-					values are still awaiting source sync.
+					v0.2.6 rematch-loop test build. Both players choose secretly, then the server resolves the two locked actions in priority order.
+					Recover remains a permanent fifth action. Finished battles can now be replayed in the same room after both players request a
+					rematch. Exact Cardputer balance values are still awaiting source sync.
 				</div>
 			</section>
 		</main>
@@ -287,12 +318,19 @@
 			const roomInput = document.querySelector('#room-code');
 			const currentRoom = document.querySelector('#current-room');
 			const playerLabel = document.querySelector('#player-label');
+			const matchNumber = document.querySelector('#match-number');
 			const signalToss = document.querySelector('#signal-toss');
 			const roundPanel = document.querySelector('#round-panel');
 			const roundNumber = document.querySelector('#round-number');
 			const roundPriority = document.querySelector('#round-priority');
 			const roundLockStatus = document.querySelector('#round-lock-status');
 			const status = document.querySelector('#status');
+			const resultPanel = document.querySelector('#result-panel');
+			const resultTitle = document.querySelector('#result-title');
+			const resultCopy = document.querySelector('#result-copy');
+			const rematchButton = document.querySelector('#rematch');
+			const newBattleButton = document.querySelector('#new-battle');
+			const rematchState = document.querySelector('#rematch-state');
 			const battleLog = document.querySelector('#battle-log');
 			const player1Card = document.querySelector('#player-1');
 			const player2Card = document.querySelector('#player-2');
@@ -397,6 +435,8 @@
 				let readyLabel = state.ready[player - 1] ? 'Ready' : 'Not ready';
 				if (state.started && state.winner === null) {
 					readyLabel = state.lockedPlayers?.[player - 1] ? 'Move locked' : 'Choosing move';
+				} else if (state.winner !== null) {
+					readyLabel = state.winner === player ? 'Winner' : 'Defeated';
 				}
 				setText(`#ready-${player}`, readyLabel);
 
@@ -498,11 +538,38 @@
 				}
 			}
 
+			function renderResultPanel() {
+				const finished = state.winner !== null;
+				resultPanel.style.display = finished ? 'block' : 'none';
+				if (!finished) return;
+
+				const won = state.winner === playerNumber;
+				const myVote = Boolean(state.rematch?.[playerNumber - 1]);
+				const opponent = playerNumber === 1 ? 2 : 1;
+				const opponentVote = Boolean(state.rematch?.[opponent - 1]);
+
+				resultTitle.textContent = won ? 'YOU WIN' : `PLAYER ${state.winner} WINS`;
+				resultCopy.textContent = `Match ${state.matchNumber} is complete. Rematch keeps this room and returns both players to lineage selection.`;
+				rematchButton.disabled = myVote || !connectedPlayers.includes(1) || !connectedPlayers.includes(2);
+				rematchButton.textContent = myVote ? 'REMATCH REQUESTED' : 'REMATCH';
+
+				if (myVote && opponentVote) {
+					rematchState.textContent = 'Both players accepted. Resetting battle...';
+				} else if (myVote) {
+					rematchState.textContent = `Waiting for Player ${opponent} to accept the rematch.`;
+				} else if (opponentVote) {
+					rematchState.textContent = `Player ${opponent} requested a rematch.`;
+				} else {
+					rematchState.textContent = 'Both players must choose REMATCH to reuse this room.';
+				}
+			}
+
 			function render() {
 				if (!state || !playerNumber) return;
 				renderCreature(1);
 				renderCreature(2);
 				renderLineagePicker();
+				matchNumber.textContent = state.matchNumber ?? 1;
 
 				player1Card.classList.toggle('active', state.started && state.roundFirstPlayer === 1 && state.winner === null);
 				player2Card.classList.toggle('active', state.started && state.roundFirstPlayer === 2 && state.winner === null);
@@ -516,6 +583,7 @@
 				signalToss.textContent =
 					state.started && state.initiativeWinner ? `SIGNAL TOSS: Player ${state.initiativeWinner} gets Round 1 priority.` : '';
 				renderRoundPanel(myLocked, opponentLocked, opponent);
+				renderResultPanel();
 				readyButton.disabled = !bothConnected || playerReady || state.winner !== null;
 
 				if (state.winner !== null) {
@@ -553,6 +621,11 @@
 			});
 			lineageSelect.addEventListener('change', () => sendMessage({ type: 'select-lineage', lineage: lineageSelect.value }));
 			readyButton.addEventListener('click', () => sendMessage({ type: 'ready' }));
+			rematchButton.addEventListener('click', () => sendMessage({ type: 'rematch' }));
+			newBattleButton.addEventListener('click', () => {
+				if (socket) socket.close();
+				location.reload();
+			});
 		</script>
 	</body>
 </html>

@@ -55,7 +55,7 @@ interface CreatureState {
 }
 
 interface BattleState {
-	version: 7;
+	version: 8;
 	players: [CreatureState, CreatureState];
 	ready: [boolean, boolean];
 	started: boolean;
@@ -66,6 +66,8 @@ interface BattleState {
 	winner: PlayerNumber | null;
 	lockedMoves: [MoveId | 'recover' | null, MoveId | 'recover' | null];
 	lockedCosts: [number | null, number | null];
+	rematch: [boolean, boolean];
+	matchNumber: number;
 	log: string[];
 }
 
@@ -319,7 +321,7 @@ function randomPercent(): number {
 
 function createInitialState(): BattleState {
 	return {
-		version: 7,
+		version: 8,
 		players: [createCreature(1), createCreature(2)],
 		ready: [false, false],
 		started: false,
@@ -330,6 +332,8 @@ function createInitialState(): BattleState {
 		winner: null,
 		lockedMoves: [null, null],
 		lockedCosts: [null, null],
+		rematch: [false, false],
+		matchNumber: 1,
 		log: ['Battle room created.'],
 	};
 }
@@ -423,7 +427,7 @@ export class BattleRoom extends DurableObject<Env> {
 	private async getState(): Promise<BattleState> {
 		const storedState = await this.ctx.storage.get<BattleState | { version?: number }>('state');
 
-		if (!storedState || storedState.version !== 7) {
+		if (!storedState || storedState.version !== 8) {
 			const state = createInitialState();
 			await this.ctx.storage.put('state', state);
 			return state;
@@ -495,6 +499,50 @@ export class BattleRoom extends DurableObject<Env> {
 		}
 	}
 
+	private resetForRematch(state: BattleState) {
+		const player1Lineage = state.players[0].lineage;
+		const player2Lineage = state.players[1].lineage;
+
+		state.players = [createCreature(1, player1Lineage), createCreature(2, player2Lineage)];
+		state.ready = [false, false];
+		state.started = false;
+		state.phase = 'waiting';
+		state.round = 0;
+		state.roundFirstPlayer = null;
+		state.initiativeWinner = null;
+		state.winner = null;
+		state.lockedMoves = [null, null];
+		state.lockedCosts = [null, null];
+		state.rematch = [false, false];
+		state.matchNumber += 1;
+		state.log = [`Match ${state.matchNumber} ready. Choose your lineage and press READY.`];
+	}
+
+	private async handleRematch(socket: WebSocket, player: PlayerNumber) {
+		const state = await this.getState();
+
+		if (state.winner === null || state.phase !== 'finished') {
+			this.send(socket, { type: 'error', message: 'Rematch is only available after the battle ends.' });
+			return;
+		}
+
+		if (!this.bothPlayersConnected()) {
+			this.send(socket, { type: 'error', message: 'Both players must be connected for a rematch.' });
+			return;
+		}
+
+		if (state.rematch[player - 1]) return;
+
+		state.rematch[player - 1] = true;
+		this.addLog(state, `Player ${player} requested a rematch.`);
+
+		if (state.rematch[0] && state.rematch[1]) {
+			this.resetForRematch(state);
+		}
+
+		await this.saveAndBroadcast(state);
+	}
+
 	private async handleReady(socket: WebSocket, player: PlayerNumber) {
 		const state = await this.getState();
 
@@ -517,6 +565,7 @@ export class BattleRoom extends DurableObject<Env> {
 			state.initiativeWinner = startingPlayer;
 			state.lockedMoves = [null, null];
 			state.lockedCosts = [null, null];
+			state.rematch = [false, false];
 			this.addLog(state, 'Both players ready. Signal Toss...');
 			this.addLog(state, `Player ${startingPlayer} wins the Signal Toss and has first resolution priority.`);
 			this.addLog(state, 'Round 1: both players lock in a move.');
@@ -875,6 +924,11 @@ export class BattleRoom extends DurableObject<Env> {
 			return;
 		}
 
+		if (data.type === 'rematch') {
+			await this.handleRematch(socket, attachment.player);
+			return;
+		}
+
 		if (data.type === 'recover') await this.handleRecover(socket, attachment.player);
 	}
 
@@ -891,6 +945,7 @@ export class BattleRoom extends DurableObject<Env> {
 			state.initiativeWinner = null;
 			state.lockedMoves = [null, null];
 			state.lockedCosts = [null, null];
+			state.rematch = [false, false];
 			this.addLog(state, `Player ${attachment.player} disconnected. Battle paused.`);
 			await this.ctx.storage.put('state', state);
 		}
