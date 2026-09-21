@@ -78,3 +78,43 @@ Example resolved move event:
 The current browser uses these server events for lightweight feedback only: move-lock pulses, attack/hit motion, Recover/heal flashes, status flashes, Signal Toss/round callouts, and a winner pulse.
 
 The event stream is the important piece. The current animations are intentionally modest and can be replaced later without changing battle resolution.
+
+## v0.2.8 mock external creature handoff
+
+v0.2.8 adds a development-only transport for exercising the creature payload contract before live Cardputer networking is implemented.
+
+A connected client can send the following WebSocket message before that player presses READY:
+
+```json
+{
+  "type": "import-creature",
+  "creature": {
+    "format": "demonym-battle-creature",
+    "version": 1,
+    "source": "cardputer",
+    "creatureId": "cardputer-mock-p1-cinder",
+    "name": "Cinder Device Test",
+    "lineage": "Cinder",
+    "stats": {
+      "maxHp": 100,
+      "maxEnergy": 10
+    },
+    "moveIds": [
+      "pulse-strike",
+      "overcharge",
+      "reckless-rush",
+      "ember-spire"
+    ]
+  }
+}
+```
+
+The Durable Object validates and normalizes the payload before replacing that player's pre-battle creature. External imports currently require `source: "cardputer"`, exactly four unique known move IDs, a known lineage, positive bounded HP/Energy values, and bounded creature ID/name strings. Unknown moves, malformed JSON, unsupported versions, and imports after READY are rejected.
+
+The server rebuilds runtime state from the accepted payload; clients cannot provide current HP, current Energy, statuses, lock state, or other live battle values.
+
+This is deliberately **not** live Cardputer transport. The browser's `DEVICE PAYLOAD TEST` panel is only a protocol harness that simulates the device handoff and allows malformed payloads to be tested against server validation.
+
+Rematches preserve the exact accepted creature payload, including a mock Cardputer payload. Choosing a lineage or using the `USE WEB PRESET` action replaces it with a normal server-generated `web-test` payload.
+
+The browser also shows the current creature source as `WEB TEST` or `CARDPUTER MOCK` so protocol tests are easy to verify from both clients.

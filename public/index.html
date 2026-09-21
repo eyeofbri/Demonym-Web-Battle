@@ -50,6 +50,13 @@
 			.lineage-picker label { margin-bottom: 8px; font-weight: bold; }
 			.lineage-picker select { width: 100%; padding: 10px 12px; font: inherit; background: #181818; color: #fff; border: 1px solid #666; }
 			.lineage-picker small { margin-top: 7px; opacity: 0.6; }
+			.source-line { margin-top: 9px; font-size: 0.82rem; opacity: 0.72; }
+			.payload-lab { margin: 0 0 14px; padding: 12px 14px; border: 1px dashed #444; }
+			.payload-lab summary { cursor: pointer; font-weight: bold; }
+			.payload-lab p { margin: 10px 0; opacity: 0.7; font-size: 0.82rem; }
+			.payload-lab textarea { width: 100%; min-height: 190px; resize: vertical; padding: 10px; border: 1px solid #555; background: #0b0b0b; color: #fff; font: inherit; line-height: 1.35; }
+			.payload-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
+			#payload-status { min-height: 18px; margin-top: 8px; opacity: 0.72; font-size: 0.82rem; }
 			#ready { width: 100%; margin-bottom: 12px; font-weight: bold; }
 			#moves { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 			.move { text-align: left; min-height: 96px; }
@@ -69,7 +76,7 @@
 			@keyframes event-status { 0%, 100% { border-style: solid; } 35%, 70% { border-style: dashed; border-color: #fff; } }
 			@keyframes event-win { 0%, 100% { transform: scale(1); } 35% { transform: scale(1.015); outline: 3px double #fff; outline-offset: 4px; } }
 			@media (prefers-reduced-motion: reduce) { .creature, #battle-event { animation: none !important; transition: none !important; } }
-			@media (max-width: 600px) { .creatures, #moves, .round-panel { grid-template-columns: 1fr; } }
+			@media (max-width: 600px) { .creatures, #moves, .round-panel, .payload-actions { grid-template-columns: 1fr; } }
 		</style>
 	</head>
 	<body>
@@ -95,6 +102,7 @@
 						<strong>PLAYER 1</strong>
 						<div id="name-1" class="creature-name">Husk Demonym</div>
 						<div>Lineage: <span id="lineage-1">Husk</span></div>
+						<div class="source-line">Source: <span id="source-1">WEB TEST</span></div>
 						<div class="stat">HP: <span id="hp-1">100</span>/<span id="max-hp-1">100</span></div>
 						<div class="stat">Energy: <span id="energy-1">7</span>/<span id="max-energy-1">10</span></div>
 						<div class="status-list" id="statuses-1">No statuses</div>
@@ -105,6 +113,7 @@
 						<strong>PLAYER 2</strong>
 						<div id="name-2" class="creature-name">Wisp Demonym</div>
 						<div>Lineage: <span id="lineage-2">Wisp</span></div>
+						<div class="source-line">Source: <span id="source-2">WEB TEST</span></div>
 						<div class="stat">HP: <span id="hp-2">100</span>/<span id="max-hp-2">100</span></div>
 						<div class="stat">Energy: <span id="energy-2">7</span>/<span id="max-energy-2">10</span></div>
 						<div class="status-list" id="statuses-2">No statuses</div>
@@ -117,6 +126,18 @@
 					<select id="lineage-select" disabled></select>
 					<small>Choose your lineage before pressing READY. The choice locks when you ready up.</small>
 				</div>
+
+				<details class="payload-lab">
+					<summary>DEVICE PAYLOAD TEST</summary>
+					<p>This developer tool simulates a Cardputer sending its creature to the room. Generate a mock payload from your current creature, edit it if you want to test validation, then import it before pressing READY.</p>
+					<textarea id="payload-json" spellcheck="false" aria-label="Mock Cardputer creature payload"></textarea>
+					<div class="payload-actions">
+						<button id="generate-payload">GENERATE MOCK</button>
+						<button id="import-payload">IMPORT PAYLOAD</button>
+						<button id="web-preset">USE WEB PRESET</button>
+					</div>
+					<div id="payload-status">Protocol test only. This is not live Cardputer transport yet.</div>
+				</details>
 
 				<div id="signal-toss"></div>
 				<div id="battle-event" aria-live="polite"></div>
@@ -143,7 +164,7 @@
 					<ol id="battle-log"></ol>
 				</div>
 
-				<div class="note">v0.2.7 battle-protocol test build. Creature identity/loadout is now carried in a versioned Demonym battle payload, and the server emits battle events that drive lightweight UI feedback. Both players still choose secretly before server resolution. Exact Cardputer balance values are still awaiting source sync.</div>
+				<div class="note">v0.2.8 external-payload test build. The room can now accept and validate a mock Cardputer creature payload before READY, while keeping the same hidden round-lock battle flow. This tests the handoff contract only; live Cardputer transport and exact firmware balance sync come later.</div>
 			</section>
 		</main>
 
@@ -155,6 +176,11 @@
 			const joinButton = document.querySelector('#join');
 			const readyButton = document.querySelector('#ready');
 			const lineageSelect = document.querySelector('#lineage-select');
+			const payloadJson = document.querySelector('#payload-json');
+			const generatePayloadButton = document.querySelector('#generate-payload');
+			const importPayloadButton = document.querySelector('#import-payload');
+			const webPresetButton = document.querySelector('#web-preset');
+			const payloadStatus = document.querySelector('#payload-status');
 			const movesContainer = document.querySelector('#moves');
 			const roomInput = document.querySelector('#room-code');
 			const currentRoom = document.querySelector('#current-room');
@@ -244,6 +270,11 @@
 
 				if (event.type === 'action_locked') {
 					await Promise.all([pulseCard(event.player, 'event-lock', 360), showBattleEvent(`PLAYER ${event.player} // MOVE LOCKED`, 360)]);
+					return;
+				}
+
+				if (event.type === 'creature_imported') {
+					await Promise.all([pulseCard(event.player, 'event-status', 520), showBattleEvent(`P${event.player} // DEVICE CREATURE LOADED`, 560)]);
 					return;
 				}
 
@@ -347,7 +378,10 @@
 						return;
 					}
 
-					if (message.type === 'error') status.textContent = message.message;
+					if (message.type === 'error') {
+						status.textContent = message.message;
+						if (String(message.message).toLowerCase().includes('payload') || String(message.message).toLowerCase().includes('creature')) payloadStatus.textContent = message.message;
+					}
 				});
 
 				socket.addEventListener('close', () => {
@@ -367,6 +401,7 @@
 				const creature = state.players[player - 1];
 				setText(`#name-${player}`, creature.payload.name);
 				setText(`#lineage-${player}`, creature.payload.lineage);
+				setText(`#source-${player}`, creature.payload.source === 'cardputer' ? 'CARDPUTER MOCK' : 'WEB TEST');
 				setText(`#hp-${player}`, creature.hp);
 				setText(`#max-hp-${player}`, creature.payload.stats.maxHp);
 				setText(`#energy-${player}`, creature.energy);
@@ -393,6 +428,38 @@
 				return move.energyCost + (disrupted ? 2 : 0);
 			}
 
+			function canEditCreature() {
+				if (!playerNumber || !state) return false;
+				return !state.started && !state.ready[playerNumber - 1] && state.winner === null;
+			}
+
+			function buildMockDevicePayload() {
+				if (!playerNumber || !state) return null;
+				const current = state.players[playerNumber - 1].payload;
+				return {
+					format: 'demonym-battle-creature',
+					version: 1,
+					source: 'cardputer',
+					creatureId: `cardputer-mock-p${playerNumber}-${current.lineage.toLowerCase()}`,
+					name: `${current.lineage} Device Test`,
+					lineage: current.lineage,
+					stats: { ...current.stats },
+					moveIds: [...current.moveIds],
+				};
+			}
+
+			function renderPayloadLab() {
+				if (!playerNumber || !state) return;
+				const editable = canEditCreature();
+				generatePayloadButton.disabled = !editable;
+				importPayloadButton.disabled = !editable;
+				webPresetButton.disabled = !editable;
+				const current = state.players[playerNumber - 1].payload;
+				payloadStatus.textContent = current.source === 'cardputer'
+					? `Loaded from mock Cardputer payload: ${current.creatureId}`
+					: 'Using server web-test preset. Generate a mock payload to simulate device handoff.';
+			}
+
 			function renderLineagePicker() {
 				if (!playerNumber || !state) return;
 
@@ -411,7 +478,7 @@
 				}
 
 				lineageSelect.value = creature.payload.lineage;
-				lineageSelect.disabled = state.started || state.ready[playerNumber - 1] || state.winner !== null;
+				lineageSelect.disabled = !canEditCreature();
 			}
 
 			function renderMoves() {
@@ -508,6 +575,7 @@
 				renderCreature(1);
 				renderCreature(2);
 				renderLineagePicker();
+				renderPayloadLab();
 				matchNumber.textContent = state.matchNumber ?? 1;
 
 				player1Card.classList.toggle('active', state.started && state.roundFirstPlayer === 1 && state.winner === null);
@@ -556,6 +624,27 @@
 			joinButton.addEventListener('click', () => connectToRoom(roomInput.value));
 			roomInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') connectToRoom(roomInput.value); });
 			lineageSelect.addEventListener('change', () => sendMessage({ type: 'select-lineage', lineage: lineageSelect.value }));
+			generatePayloadButton.addEventListener('click', () => {
+				const payload = buildMockDevicePayload();
+				if (!payload) return;
+				payloadJson.value = JSON.stringify(payload, null, 2);
+				payloadStatus.textContent = 'Mock payload generated locally. Import it to send it through server validation.';
+			});
+			importPayloadButton.addEventListener('click', () => {
+				let payload;
+				try {
+					payload = JSON.parse(payloadJson.value);
+				} catch {
+					payloadStatus.textContent = 'Payload is not valid JSON.';
+					return;
+				}
+				payloadStatus.textContent = 'Sending payload to battle server...';
+				sendMessage({ type: 'import-creature', creature: payload });
+			});
+			webPresetButton.addEventListener('click', () => {
+				if (!playerNumber || !state) return;
+				sendMessage({ type: 'select-lineage', lineage: state.players[playerNumber - 1].payload.lineage });
+			});
 			readyButton.addEventListener('click', () => sendMessage({ type: 'ready' }));
 			rematchButton.addEventListener('click', () => sendMessage({ type: 'rematch' }));
 			newBattleButton.addEventListener('click', () => {

@@ -6,7 +6,7 @@ type Pressure = 'Neutral' | 'Force' | 'Signal' | 'Heat' | 'Corrosion' | 'Echo';
 type MoveRole = 'attack' | 'guard' | 'heal' | 'utility';
 type BattlePhase = 'waiting' | 'selecting' | 'finished';
 type StatusId = 'stagger' | 'disruption' | 'burn' | 'corrosion' | 'echo-interference' | 'evasion' | 'ward';
-type BattleEventType = 'lineage_selected' | 'ready' | 'signal_toss' | 'round_start' | 'action_locked' | 'move_resolved' | 'move_missed' | 'recover' | 'status_applied' | 'heal' | 'battle_end' | 'rematch_requested' | 'rematch_started' | 'disconnect';
+type BattleEventType = 'lineage_selected' | 'creature_imported' | 'ready' | 'signal_toss' | 'round_start' | 'action_locked' | 'move_resolved' | 'move_missed' | 'recover' | 'status_applied' | 'heal' | 'battle_end' | 'rematch_requested' | 'rematch_started' | 'disconnect';
 type CreaturePayloadSource = 'web-test' | 'cardputer';
 
 type MoveId =
@@ -79,7 +79,7 @@ interface BattleEvent {
 }
 
 interface BattleState {
-	version: 9;
+	version: 10;
 	players: [CreatureState, CreatureState];
 	ready: [boolean, boolean];
 	started: boolean;
@@ -105,6 +105,7 @@ interface ClientMessage {
 	type?: string;
 	moveId?: string;
 	lineage?: string;
+	creature?: unknown;
 }
 
 interface LineageDefinition {
@@ -311,6 +312,10 @@ const WARD_DAMAGE_REDUCTION = 0.5;
 const EVASION_BONUS = 20;
 const BURN_DAMAGE = 4;
 const CORROSION_DAMAGE_MULTIPLIER = 1.2;
+const MAX_IMPORTED_NAME_LENGTH = 48;
+const MAX_IMPORTED_ID_LENGTH = 64;
+const MAX_IMPORTED_HP = 1000;
+const MAX_IMPORTED_ENERGY = 100;
 
 const BATTLE_CONFIG = {
 	recoverEnergy: RECOVER_ENERGY,
@@ -322,6 +327,7 @@ const BATTLE_PROTOCOL = {
 	creaturePayloadFormat: 'demonym-battle-creature',
 	creaturePayloadVersion: 1,
 	battleEventVersion: 1,
+	externalCreatureImport: true,
 };
 
 function createWebTestPayload(lineage: Lineage): BattleCreaturePayload {
@@ -338,27 +344,67 @@ function createWebTestPayload(lineage: Lineage): BattleCreaturePayload {
 	};
 }
 
-function validateBattleCreaturePayload(payload: unknown): payload is BattleCreaturePayload {
-	if (!payload || typeof payload !== 'object') return false;
+interface PayloadValidationResult {
+	ok: boolean;
+	payload?: BattleCreaturePayload;
+	error?: string;
+}
+
+function validateAndNormalizeBattleCreaturePayload(payload: unknown): PayloadValidationResult {
+	if (!payload || typeof payload !== 'object') return { ok: false, error: 'Creature payload must be an object.' };
+
 	const candidate = payload as Partial<BattleCreaturePayload>;
-	if (candidate.format !== 'demonym-battle-creature' || candidate.version !== 1) return false;
-	if (!candidate.lineage || !(candidate.lineage in LINEAGE_LIBRARY)) return false;
-	if (!candidate.creatureId || !candidate.name) return false;
-	if (!candidate.stats || !Number.isInteger(candidate.stats.maxHp) || candidate.stats.maxHp <= 0) return false;
-	if (!Number.isInteger(candidate.stats.maxEnergy) || candidate.stats.maxEnergy <= 0) return false;
-	if (!Array.isArray(candidate.moveIds) || candidate.moveIds.length !== 4 || new Set(candidate.moveIds).size !== 4) return false;
-	return candidate.moveIds.every((moveId) => moveId in MOVE_LIBRARY);
+	if (candidate.format !== 'demonym-battle-creature') return { ok: false, error: 'Unknown creature payload format.' };
+	if (candidate.version !== 1) return { ok: false, error: 'Unsupported creature payload version.' };
+	if (candidate.source !== 'web-test' && candidate.source !== 'cardputer') return { ok: false, error: 'Unknown creature payload source.' };
+	if (!candidate.lineage || !(candidate.lineage in LINEAGE_LIBRARY)) return { ok: false, error: 'Unknown Demonym lineage.' };
+
+	const creatureId = typeof candidate.creatureId === 'string' ? candidate.creatureId.trim() : '';
+	const name = typeof candidate.name === 'string' ? candidate.name.trim() : '';
+	if (!creatureId || creatureId.length > MAX_IMPORTED_ID_LENGTH) return { ok: false, error: `creatureId must be 1-${MAX_IMPORTED_ID_LENGTH} characters.` };
+	if (!name || name.length > MAX_IMPORTED_NAME_LENGTH) return { ok: false, error: `name must be 1-${MAX_IMPORTED_NAME_LENGTH} characters.` };
+
+	if (!candidate.stats || !Number.isInteger(candidate.stats.maxHp) || candidate.stats.maxHp <= 0 || candidate.stats.maxHp > MAX_IMPORTED_HP) {
+		return { ok: false, error: `maxHp must be an integer between 1 and ${MAX_IMPORTED_HP}.` };
+	}
+	if (!Number.isInteger(candidate.stats.maxEnergy) || candidate.stats.maxEnergy <= 0 || candidate.stats.maxEnergy > MAX_IMPORTED_ENERGY) {
+		return { ok: false, error: `maxEnergy must be an integer between 1 and ${MAX_IMPORTED_ENERGY}.` };
+	}
+
+	if (!Array.isArray(candidate.moveIds) || candidate.moveIds.length !== 4) return { ok: false, error: 'Creature payload must contain exactly four move IDs.' };
+	if (new Set(candidate.moveIds).size !== 4) return { ok: false, error: 'Creature move IDs must be unique.' };
+	if (!candidate.moveIds.every((moveId) => typeof moveId === 'string' && moveId in MOVE_LIBRARY)) return { ok: false, error: 'Creature payload contains an unknown move ID.' };
+
+	return {
+		ok: true,
+		payload: {
+			format: 'demonym-battle-creature',
+			version: 1,
+			source: candidate.source,
+			creatureId,
+			name,
+			lineage: candidate.lineage as Lineage,
+			stats: { maxHp: candidate.stats.maxHp, maxEnergy: candidate.stats.maxEnergy },
+			moveIds: [...candidate.moveIds] as MoveId[],
+		},
+	};
+}
+
+function validateBattleCreaturePayload(payload: unknown): payload is BattleCreaturePayload {
+	return validateAndNormalizeBattleCreaturePayload(payload).ok;
 }
 
 function createCreatureFromPayload(payload: BattleCreaturePayload): CreatureState {
-	if (!validateBattleCreaturePayload(payload)) {
-		throw new Error('Invalid Demonym battle creature payload.');
+	const validation = validateAndNormalizeBattleCreaturePayload(payload);
+	if (!validation.ok || !validation.payload) {
+		throw new Error(validation.error ?? 'Invalid Demonym battle creature payload.');
 	}
 
+	const normalized = validation.payload;
 	return {
-		payload: structuredClone(payload),
-		hp: payload.stats.maxHp,
-		energy: Math.min(STARTING_ENERGY, payload.stats.maxEnergy),
+		payload: structuredClone(normalized),
+		hp: normalized.stats.maxHp,
+		energy: Math.min(STARTING_ENERGY, normalized.stats.maxEnergy),
 		statuses: [],
 		lastMoveId: null,
 	};
@@ -383,7 +429,7 @@ function randomPercent(): number {
 
 function createInitialState(): BattleState {
 	return {
-		version: 9,
+		version: 10,
 		players: [createCreature(1), createCreature(2)],
 		ready: [false, false],
 		started: false,
@@ -491,7 +537,7 @@ export class BattleRoom extends DurableObject<Env> {
 	private async getState(): Promise<BattleState> {
 		const storedState = await this.ctx.storage.get<BattleState | { version?: number }>('state');
 
-		if (!storedState || storedState.version !== 9) {
+		if (!storedState || storedState.version !== 10) {
 			const state = createInitialState();
 			await this.ctx.storage.put('state', state);
 			return state;
@@ -578,10 +624,10 @@ export class BattleRoom extends DurableObject<Env> {
 	}
 
 	private resetForRematch(state: BattleState) {
-		const player1Lineage = state.players[0].payload.lineage;
-		const player2Lineage = state.players[1].payload.lineage;
+		const player1Payload = structuredClone(state.players[0].payload);
+		const player2Payload = structuredClone(state.players[1].payload);
 
-		state.players = [createCreature(1, player1Lineage), createCreature(2, player2Lineage)];
+		state.players = [createCreatureFromPayload(player1Payload), createCreatureFromPayload(player2Payload)];
 		state.ready = [false, false];
 		state.started = false;
 		state.phase = 'waiting';
@@ -676,11 +722,41 @@ export class BattleRoom extends DurableObject<Env> {
 		}
 
 		const lineage = rawLineage as Lineage;
-		if (state.players[player - 1].payload.lineage === lineage) return;
+		if (state.players[player - 1].payload.lineage === lineage && state.players[player - 1].payload.source === 'web-test') return;
 
 		state.players[player - 1] = createCreature(player, lineage);
 		this.addLog(state, `Player ${player} selected ${lineage}.`);
 		this.addEvent(state, { type: 'lineage_selected', player, message: `Player ${player} selected ${lineage}.` });
+		await this.saveAndBroadcast(state);
+	}
+
+	private async handleCreatureImport(socket: WebSocket, player: PlayerNumber, rawPayload: unknown) {
+		const state = await this.getState();
+
+		if (state.winner !== null) {
+			this.send(socket, { type: 'error', message: 'This battle is already over.' });
+			return;
+		}
+
+		if (state.started || state.ready[player - 1]) {
+			this.send(socket, { type: 'error', message: 'Creature payload is locked once you are ready.' });
+			return;
+		}
+
+		const validation = validateAndNormalizeBattleCreaturePayload(rawPayload);
+		if (!validation.ok || !validation.payload) {
+			this.send(socket, { type: 'error', message: `Payload rejected: ${validation.error ?? 'Invalid creature payload.'}` });
+			return;
+		}
+
+		if (validation.payload.source !== 'cardputer') {
+			this.send(socket, { type: 'error', message: 'External creature imports must use source: "cardputer".' });
+			return;
+		}
+
+		state.players[player - 1] = createCreatureFromPayload(validation.payload);
+		this.addLog(state, `Player ${player} imported ${validation.payload.name} from a mock Cardputer payload.`);
+		this.addEvent(state, { type: 'creature_imported', player, message: `Player ${player} imported an external creature payload.` });
 		await this.saveAndBroadcast(state);
 	}
 
@@ -1016,6 +1092,11 @@ export class BattleRoom extends DurableObject<Env> {
 
 		if (data.type === 'select-lineage') {
 			await this.handleLineageSelect(socket, attachment.player, data.lineage);
+			return;
+		}
+
+		if (data.type === 'import-creature') {
+			await this.handleCreatureImport(socket, attachment.player, data.creature);
 			return;
 		}
 
