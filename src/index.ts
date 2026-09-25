@@ -32,7 +32,8 @@ type ClientCapability =
 	| 'battle-events-v1'
 	| 'recover-action-v1'
 	| 'rematch-v1'
-	| 'session-resume-v1';
+	| 'session-resume-v1'
+	| 'compact-state-v1';
 
 interface StatusState { id: StatusId; turns: number; stacks?: number; }
 interface CreatureState {
@@ -104,7 +105,7 @@ const RECONNECT_GRACE_MS = 60_000;
 const BATTLE_CONFIG = { recoverEnergy: RECOVER_ENERGY, energyRecoveryPerRound: 0, battleRules: 19 };
 const REQUIRED_CLIENT_CAPABILITIES: ClientCapability[] = ['creature-payload-v2','round-lock-v1','battle-events-v1','recover-action-v1','session-resume-v1'];
 const CONNECTION_PROTOCOL = {
-	name: 'demonym-connect-v1', version: 1, serverVersion: '0.3.2', requiredCapabilities: REQUIRED_CLIENT_CAPABILITIES,
+	name: 'demonym-connect-v1', version: 1, serverVersion: '0.3.2.1', requiredCapabilities: REQUIRED_CLIENT_CAPABILITIES,
 	supportedClientTypes: ['web','cardputer'] as ClientType[], aliases: ['demonym-connect'],
 };
 const BATTLE_PROTOCOL = {
@@ -230,7 +231,41 @@ export class BattleRoom extends DurableObject<Env> {
 		};
 	}
 
+	private usesCompactState(socket: WebSocket): boolean {
+		const attachment = socket.deserializeAttachment() as SocketAttachment | null;
+		return attachment?.clientInfo?.clientType === 'cardputer' &&
+			attachment.clientInfo.capabilities.includes('compact-state-v1');
+	}
+
+	private sendCompactState(socket: WebSocket, state: BattleState, player: PlayerNumber) {
+		const opponent = otherPlayer(player);
+		const connected = this.getConnectedPlayers();
+		this.send(socket, {
+			type: 'room-state',
+			player,
+			round: state.round,
+			started: state.started,
+			phase: state.phase,
+			ready: state.ready[player - 1],
+			opponentReady: state.ready[opponent - 1],
+			opponentConnected: connected.includes(opponent),
+			locked: state.lockedMoves[player - 1] !== null,
+			opponentLocked: state.lockedMoves[opponent - 1] !== null,
+			winner: state.winner,
+			matchNumber: state.matchNumber,
+			eventSeq: state.eventSeq,
+		});
+	}
+
 	private sendState(socket: WebSocket, state: BattleState, player: PlayerNumber, type: 'welcome' | 'state' = 'state') {
+		// Physical Cardputers opt into compact room-state records. The browser and
+		// Cardputer Mock intentionally retain the full state envelope so the
+		// developer UI can continue to render move/lineage libraries and history.
+		if (this.usesCompactState(socket)) {
+			this.sendCompactState(socket, state, player);
+			return;
+		}
+
 		this.send(socket, {
 			type,
 			...(type === 'welcome' ? { player } : {}),
