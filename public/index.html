@@ -543,8 +543,8 @@
 				</div>
 
 				<div class="note">
-					v0.3.1 reconnect hotfix. Battle controls stay locked while server-authored events play out, and a dropped WebSocket can resume the
-					same player session for up to 60 seconds.
+					v0.3.2 canonical battle bridge. Browser and Cardputer payloads now resolve through Battle Rules v19 while the 60-second
+					session-resume loop remains intact.
 				</div>
 			</section>
 		</main>
@@ -595,7 +595,7 @@
 			let state = null;
 			let moveLibrary = {};
 			let lineageLibrary = {};
-			let battleConfig = { recoverEnergy: 2, energyRecoveryPerRound: 1 };
+			let battleConfig = { recoverEnergy: 2, energyRecoveryPerRound: 0, battleRules: 19 };
 			let battleProtocol = {};
 			let lastEventId = 0;
 			let eventQueue = Promise.resolve();
@@ -610,6 +610,7 @@
 
 			const CLIENT_CAPABILITIES = [
 				'creature-payload-v1',
+				'creature-payload-v2',
 				'round-lock-v1',
 				'battle-events-v1',
 				'recover-action-v1',
@@ -676,7 +677,7 @@
 
 			function sendClientHello() {
 				if (!connectionProtocol) return;
-				const version = requestedClientType === 'cardputer' ? 'browser-mock-0.3.1' : 'web-0.3.1';
+				const version = requestedClientType === 'cardputer' ? 'browser-mock-0.3.2' : 'web-0.3.2';
 				sendMessage({
 					type: 'client-hello',
 					protocol: connectionProtocol.name,
@@ -971,18 +972,18 @@
 			function renderCreature(player) {
 				const creature = state.players[player - 1];
 				setText(`#name-${player}`, creature.payload.name);
-				setText(`#lineage-${player}`, creature.payload.lineage);
+				setText(`#lineage-${player}`, creature.payload.lineage.charAt(0).toUpperCase() + creature.payload.lineage.slice(1));
 				setText(`#source-${player}`, creature.payload.source === 'cardputer' ? 'CARDPUTER PAYLOAD' : 'WEB TEST');
 				setText(`#client-${player}`, clientLabel(clientInfoForPlayer(player)));
 				setText(`#hp-${player}`, creature.hp);
-				setText(`#max-hp-${player}`, creature.payload.stats.maxHp);
+				setText(`#max-hp-${player}`, creature.maxHp);
 				setText(`#energy-${player}`, creature.energy);
-				setText(`#max-energy-${player}`, creature.payload.stats.maxEnergy);
+				setText(`#max-energy-${player}`, creature.maxEnergy);
 				let readyLabel = state.ready[player - 1] ? 'Ready' : 'Not ready';
 				if (state.started && state.winner === null) {
 					readyLabel = state.lockedPlayers?.[player - 1] ? 'Move locked' : 'Choosing move';
 				} else if (state.winner !== null) {
-					readyLabel = state.winner === player ? 'Winner' : 'Defeated';
+					readyLabel = state.winner === 0 ? 'Draw' : state.winner === player ? 'Winner' : 'Defeated';
 				}
 				setText(`#ready-${player}`, readyLabel);
 
@@ -995,9 +996,9 @@
 				);
 			}
 
-			function currentMoveCost(creature, move) {
-				const disrupted = (creature.statuses ?? []).some((item) => item.id === 'disruption');
-				return move.energyCost + (disrupted ? 2 : 0);
+			function currentMoveCost(creature, move, slot) {
+				const serverCost = creature.effectiveMoveCosts?.[slot];
+				return Number.isInteger(serverCost) ? serverCost : move.energyCost;
 			}
 
 			function canEditCreature() {
@@ -1007,17 +1008,12 @@
 
 			function buildMockDevicePayload() {
 				if (!playerNumber || !state) return null;
-				const current = state.players[playerNumber - 1].payload;
-				return {
-					format: 'demonym-battle-creature',
-					version: 1,
-					source: 'cardputer',
-					creatureId: `cardputer-mock-p${playerNumber}-${current.lineage.toLowerCase()}`,
-					name: `${current.lineage} Device Test`,
-					lineage: current.lineage,
-					stats: { ...current.stats },
-					moveIds: [...current.moveIds],
-				};
+				const current = structuredClone(state.players[playerNumber - 1].payload);
+				current.source = 'cardputer';
+				current.creatureId = (current.creatureId + 0x100000 + playerNumber) >>> 0;
+				current.visualSeed = (current.visualSeed ^ 0x0c4d0000 ^ playerNumber) >>> 0;
+				current.name = `P${playerNumber} Device Test`;
+				return current;
 			}
 
 			function renderPayloadLab() {
@@ -1057,7 +1053,7 @@
 					}
 				}
 
-				lineageSelect.value = creature.payload.lineage;
+				lineageSelect.value = creature.payload.lineage.charAt(0).toUpperCase() + creature.payload.lineage.slice(1);
 				lineageSelect.disabled = !canEditCreature();
 			}
 
@@ -1072,17 +1068,20 @@
 					state.started && state.winner === null && state.phase === 'selecting' && !alreadyLocked && bothConnected && !eventPlaybackActive;
 				movesContainer.classList.toggle('playback-locked', eventPlaybackActive && state.started && state.winner === null);
 
-				for (const moveId of creature.payload.moveIds) {
+				for (const moveId of creature.payload.moveSlots) {
+					if (moveId === 'none') continue;
 					const move = moveLibrary[moveId];
 					if (!move) continue;
 
-					const cost = currentMoveCost(creature, move);
+					const slot = creature.payload.moveSlots.indexOf(moveId);
+					const cost = currentMoveCost(creature, move, slot);
+					const coolingDown = (creature.moveCooldowns?.[slot] ?? 0) > 0;
 					const affordable = creature.energy >= cost;
 
 					const button = document.createElement('button');
 					button.className = 'move';
 					if (state.yourLockedMoveId === move.id) button.classList.add('locked');
-					button.disabled = !canLock || !affordable;
+					button.disabled = !canLock || !affordable || coolingDown;
 					button.innerHTML = `<strong>${move.name}${state.yourLockedMoveId === move.id ? ' · LOCKED' : ''}</strong><small class="pressure">${move.pressure.toUpperCase()} · ${move.accuracy}% · ${cost} EN</small><small>${move.description}</small>`;
 					button.addEventListener('click', () => sendMessage({ type: 'move', moveId: move.id }));
 					movesContainer.append(button);
@@ -1138,7 +1137,7 @@
 				const opponent = playerNumber === 1 ? 2 : 1;
 				const opponentVote = Boolean(state.rematch?.[opponent - 1]);
 
-				resultTitle.textContent = won ? 'YOU WIN' : `PLAYER ${state.winner} WINS`;
+				resultTitle.textContent = state.winner === 0 ? 'DRAW' : won ? 'YOU WIN' : `PLAYER ${state.winner} WINS`;
 				resultCopy.textContent = `Match ${state.matchNumber} is complete. Rematch keeps this room and returns both players to lineage selection.`;
 				rematchButton.disabled = myVote || !connectedPlayers.includes(1) || !connectedPlayers.includes(2);
 				rematchButton.textContent = myVote ? 'REMATCH REQUESTED' : 'REMATCH';
@@ -1184,7 +1183,7 @@
 				if (eventPlaybackActive && state.started) {
 					status.textContent = `Resolving Round ${activePlaybackRound ?? state.round}... battle controls are locked.`;
 				} else if (state.winner !== null) {
-					status.textContent = state.winner === playerNumber ? 'You win.' : `Player ${state.winner} wins.`;
+					status.textContent = state.winner === 0 ? 'Draw.' : state.winner === playerNumber ? 'You win.' : `Player ${state.winner} wins.`;
 				} else if (!bothConnected) {
 					status.textContent = 'Waiting for opponent...';
 				} else if (!state.ready[0] || !state.ready[1]) {
@@ -1236,7 +1235,8 @@
 			});
 			webPresetButton.addEventListener('click', () => {
 				if (!playerNumber || !state) return;
-				sendMessage({ type: 'select-lineage', lineage: state.players[playerNumber - 1].payload.lineage });
+				const raw = state.players[playerNumber - 1].payload.lineage;
+				sendMessage({ type: 'select-lineage', lineage: raw.charAt(0).toUpperCase() + raw.slice(1) });
 			});
 			readyButton.addEventListener('click', () => sendMessage({ type: 'ready' }));
 			rematchButton.addEventListener('click', () => sendMessage({ type: 'rematch' }));
