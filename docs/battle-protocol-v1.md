@@ -1,5 +1,7 @@
 # Demonym Connect Battle Protocol v1
 
+> **Current implementation: Web Connect v0.3.2 / Cardputer Battle Rules v19.** The older v0.2.x and v0.3/v0.3.1 sections below are retained as protocol history. v0.3.2 keeps the Demonym Connect transport protocol at version 1, replaces the old web-test creature/combat contract with canonical creature payload v2, and preserves the v0.3.1 session-resume behavior.
+
 v0.2.7 introduces a small shared data contract between the battle server and its clients. This is not Cardputer integration yet. The purpose is to stop the web build from depending on browser-only creature structures before device work begins.
 
 ## Creature payload
@@ -302,3 +304,130 @@ The v0.3.1 hotfix tightens session resume semantics without changing the public 
 - If the reconnect window expires, the missing player's slot is released and the interrupted match resets to the pre-ready state. The remaining player stays in the room and may wait for a new opponent to join using the same battle code.
 
 The last behavior is intentional: session expiry resets the interrupted battle; it does not eject the player who remained connected.
+
+
+## v0.3.2 canonical Cardputer battle bridge
+
+v0.3.2 is the first Web Connect build that uses the Cardputer's production battle contract rather than the earlier browser-only test balance. The Worker remains authoritative for online battle state, but fighter construction and turn resolution are ported from **Cardputer Battle Rules v19**.
+
+### Connection protocol
+
+The canonical protocol name is now:
+
+```json
+{
+  "protocol": "demonym-connect-v1",
+  "protocolVersion": 1
+}
+```
+
+The Worker temporarily accepts the historical `demonym-connect` name as an alias so existing developer clients have a migration path. New Cardputer and browser clients advertise `demonym-connect-v1`.
+
+Required v0.3.2 capabilities are:
+
+- `creature-payload-v2`
+- `round-lock-v1`
+- `battle-events-v1`
+- `recover-action-v1`
+- `session-resume-v1`
+
+`rematch-v1` remains optional. The reconnect token, 60-second grace window, socket-generation replacement, and same-room recovery behavior from v0.3.1 are unchanged.
+
+### Canonical creature payload v2
+
+A Cardputer sends its battle snapshot after the normal `hello-required` → `client-hello` → `hello-ack` exchange:
+
+```json
+{
+  "type": "creature-snapshot",
+  "creature": {
+    "format": "demonym-battle-creature",
+    "version": 2,
+    "source": "cardputer",
+    "schemaVersion": 1,
+    "battleRules": 19,
+    "creatureId": 286335522,
+    "visualSeed": 1146447894,
+    "publicId": 8738,
+    "name": "VESPER",
+    "lineage": "cinder",
+    "form": "static",
+    "level": 10,
+    "currentHealth": 83,
+    "currentEnergy": 41,
+    "injury": 1,
+    "combat": {
+      "attackBonus": 1,
+      "defenseBonus": -1,
+      "healthBonus": 4,
+      "energyBonus": 3,
+      "pressureResistanceMask": 0,
+      "pressureWeaknessMask": 0,
+      "pressureBoostMask": 0,
+      "installedPrimary": 9,
+      "installedSecondary": 6
+    },
+    "moveSlots": [
+      "cinder-jab",
+      "cinder-screen",
+      "cinder-flash",
+      "ember-spire"
+    ]
+  }
+}
+```
+
+The Worker validates schema/rules versions, ranges, lineage/form, installed Adaptations, move IDs, duplicate slots, and whether each equipped move is actually learned at the submitted level. It then reconstructs the runtime fighter itself. Clients do **not** submit max HP, max Energy, attack, defense, cooldowns, statuses, damage, or other mutable battle results.
+
+A real `creature-snapshot` from a Cardputer is treated as that player's READY action after validation. This matches the current firmware client, which submits its snapshot but does not send a separate `ready` message. The browser's Cardputer Mock continues to use `import-creature` plus the explicit READY button so the handoff can be inspected manually.
+
+### Server-authoritative actions
+
+Cardputer clients submit a move by equipped slot, not by arbitrary move ID:
+
+```json
+{
+  "type": "battle-action",
+  "round": 4,
+  "action": { "kind": "move", "slot": 3 }
+}
+```
+
+Standalone Guard and Recover are:
+
+```json
+{ "type": "battle-action", "round": 4, "action": { "kind": "guard" } }
+```
+
+```json
+{ "type": "battle-action", "round": 4, "action": { "kind": "recover" } }
+```
+
+The Worker checks the round, resolves the slot against the accepted immutable loadout, verifies cooldown/Energy availability, and locks the action without revealing the selected move to the opponent. Recover is the production v19 rule: **0 Energy cost, restore up to +2 Energy, consume the round action**.
+
+### Battle Rules v19 authority
+
+The v0.3.2 Worker ports the deterministic peer-battle path used by the firmware, including:
+
+- canonical fighter reconstruction from level/form/lineage/injury/combat bonuses;
+- all production move IDs and four equipped move slots;
+- Pressure strengths/resistances/boosts;
+- status effects and end-of-turn ticking;
+- cooldown and Energy rules;
+- Guard techniques versus standalone Guard;
+- all currently installed Adaptation battle effects;
+- v17 Combat Synergies;
+- lineage passive recovery;
+- alternating canonical initiative;
+- the 30-turn draw boundary;
+- permanent Recover.
+
+The old v0.2 browser balance values and automatic per-round Energy recovery are no longer used for v0.3.2 matches. Browser presets and Cardputer Mock payloads now enter the same v19 engine as physical Cardputers.
+
+### Public state and event delivery
+
+The browser state envelope remains available for reconnect/resume and includes authoritative HP, max HP, Energy, max Energy, statuses, cooldowns, and effective move costs. The battle RNG state and session tokens are not exposed in public room state.
+
+Battle events remain in the rolling `state.events` history for browser playback and reconnect recovery. v0.3.2 also emits each event as its own top-level WebSocket message so the Cardputer can consume the ordered event stream without parsing the larger browser state envelope.
+
+The first physical-device transport pass may extend the Cardputer parser with additional authoritative state fields for animation/persistence, but it does not need another combat-rules implementation: the Worker is already the online v19 authority.
