@@ -543,7 +543,7 @@
 				</div>
 
 				<div class="note">
-					v0.3.2 canonical battle bridge. Browser and Cardputer payloads now resolve through Battle Rules v19 while the 60-second
+					v0.3.2.1 connection-stability bridge. Browser and Cardputer payloads now resolve through Battle Rules v19 while the 60-second
 					session-resume loop remains intact.
 				</div>
 			</section>
@@ -677,7 +677,7 @@
 
 			function sendClientHello() {
 				if (!connectionProtocol) return;
-				const version = requestedClientType === 'cardputer' ? 'browser-mock-0.3.2' : 'web-0.3.2';
+				const version = requestedClientType === 'cardputer' ? 'browser-mock-0.3.2.1' : 'web-0.3.2.1';
 				sendMessage({
 					type: 'client-hello',
 					protocol: connectionProtocol.name,

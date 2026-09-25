@@ -431,3 +431,19 @@ The browser state envelope remains available for reconnect/resume and includes a
 Battle events remain in the rolling `state.events` history for browser playback and reconnect recovery. v0.3.2 also emits each event as its own top-level WebSocket message so the Cardputer can consume the ordered event stream without parsing the larger browser state envelope.
 
 The first physical-device transport pass may extend the Cardputer parser with additional authoritative state fields for animation/persistence, but it does not need another combat-rules implementation: the Worker is already the online v19 authority.
+
+
+## v0.3.2.1 connection stability
+
+Physical Cardputers can advertise the optional `compact-state-v1` capability.
+When that capability is present on a `clientType=cardputer` connection, the
+Worker no longer sends the large browser `welcome` / `state` envelopes to that
+socket. Instead it sends a small `room-state` record containing only room/round
+coordination fields. Top-level ordered battle events continue to carry battle
+playback. Browser clients and the browser-based Cardputer Mock do not advertise
+this capability and therefore keep the full developer state envelope.
+
+This split avoids forcing the ESP32 WebSocket client to allocate the complete
+move library, lineage library, event history and battle-state JSON on every
+room update. The persisted Durable Object battle-state schema remains version
+14; this is a transport-shaping change, not a room-state migration.
