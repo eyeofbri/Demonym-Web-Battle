@@ -1,80 +1,48 @@
 import { DurableObject } from 'cloudflare:workers';
+import {
+	MOVE_LIBRARY_V19,
+	canUseMove,
+	createRuntime,
+	effectiveEnergyCost,
+	fighterFromPayload,
+	resolvePeerTurn,
+	statusList,
+	validateCanonicalPayloadV2,
+	type BattleChoice,
+	type CanonicalCreaturePayloadV2,
+	type CanonicalLineage,
+	type MoveId,
+	type StatusId,
+	type TurnReport,
+	type V19BattleRuntime,
+	type V19Fighter,
+} from './battle-v19';
 
 type PlayerNumber = 1 | 2;
 type Lineage = 'Husk' | 'Mire' | 'Wisp' | 'Fang' | 'Choir' | 'Machine' | 'Cinder' | 'Veil';
-type Pressure = 'Neutral' | 'Force' | 'Signal' | 'Heat' | 'Corrosion' | 'Echo';
-type MoveRole = 'attack' | 'guard' | 'heal' | 'utility';
 type BattlePhase = 'waiting' | 'selecting' | 'finished';
-type StatusId = 'stagger' | 'disruption' | 'burn' | 'corrosion' | 'echo-interference' | 'evasion' | 'ward';
 type BattleEventType = 'lineage_selected' | 'creature_imported' | 'ready' | 'signal_toss' | 'round_start' | 'action_locked' | 'move_resolved' | 'move_missed' | 'recover' | 'status_applied' | 'heal' | 'battle_end' | 'rematch_requested' | 'rematch_started' | 'disconnect' | 'reconnect' | 'session_expired';
-type CreaturePayloadSource = 'web-test' | 'cardputer';
 type ClientType = 'web' | 'cardputer';
+type LockedAction = MoveId | 'guard' | 'recover' | null;
 
 type ClientCapability =
 	| 'creature-payload-v1'
+	| 'creature-payload-v2'
 	| 'round-lock-v1'
 	| 'battle-events-v1'
 	| 'recover-action-v1'
 	| 'rematch-v1'
 	| 'session-resume-v1';
 
-type MoveId =
-	| 'pulse-strike'
-	| 'quiet-ward'
-	| 'restore-pulse'
-	| 'signal-snare'
-	| 'overcharge'
-	| 'rend'
-	| 'reckless-rush'
-	| 'shell-brace'
-	| 'bog-leech'
-	| 'phase-feint'
-	| 'pursuit-bite'
-	| 'chorus-echo'
-	| 'panel-shift'
-	| 'ember-spire'
-	| 'veil-snare';
-
-interface StatusState {
-	id: StatusId;
-	turns: number;
-	stacks?: number;
-}
-
-interface MoveDefinition {
-	id: MoveId;
-	name: string;
-	pressure: Pressure;
-	role: MoveRole;
-	energyCost: number;
-	accuracy: number;
-	power: number;
-	description: string;
-	signatureOf?: Lineage;
-}
-
-interface BattleCreaturePayload {
-	format: 'demonym-battle-creature';
-	version: 1;
-	source: CreaturePayloadSource;
-	creatureId: string;
-	name: string;
-	lineage: Lineage;
-	stats: {
-		maxHp: number;
-		maxEnergy: number;
-	};
-	moveIds: MoveId[];
-}
-
+interface StatusState { id: StatusId; turns: number; stacks?: number; }
 interface CreatureState {
-	payload: BattleCreaturePayload;
+	payload: CanonicalCreaturePayloadV2;
+	fighter: V19Fighter;
 	hp: number;
 	energy: number;
 	statuses: StatusState[];
 	lastMoveId: MoveId | null;
 }
-
 interface BattleEvent {
 	id: number;
 	type: BattleEventType;
@@ -86,9 +54,8 @@ interface BattleEvent {
 	statusId?: StatusId;
 	message: string;
 }
-
 interface BattleState {
-	version: 13;
+	version: 14;
 	players: [CreatureState, CreatureState];
 	ready: [boolean, boolean];
 	started: boolean;
@@ -96,9 +63,11 @@ interface BattleState {
 	round: number;
 	roundFirstPlayer: PlayerNumber | null;
 	initiativeWinner: PlayerNumber | null;
-	winner: PlayerNumber | null;
-	lockedMoves: [MoveId | 'recover' | null, MoveId | 'recover' | null];
+	canonicalFirstPlayer: PlayerNumber | null;
+	winner: PlayerNumber | 0 | null;
+	lockedMoves: [LockedAction, LockedAction];
 	lockedCosts: [number | null, number | null];
+	battleRuntime: V19BattleRuntime | null;
 	rematch: [boolean, boolean];
 	matchNumber: number;
 	log: string[];
@@ -108,493 +77,66 @@ interface BattleState {
 	disconnectDeadlines: [number | null, number | null];
 	connectionIds: [string | null, string | null];
 }
-
-interface ClientInfo {
-	clientType: ClientType;
-	clientVersion: string;
-	capabilities: ClientCapability[];
-}
-
-interface SocketAttachment {
-	player: PlayerNumber;
-	handshakeComplete: boolean;
-	sessionToken: string;
-	resumed: boolean;
-	clientInfo?: ClientInfo;
-	connectionId: string;
-}
-
+interface ClientInfo { clientType: ClientType; clientVersion: string; capabilities: ClientCapability[]; }
+interface SocketAttachment { player: PlayerNumber; handshakeComplete: boolean; sessionToken: string; resumed: boolean; clientInfo?: ClientInfo; connectionId: string; }
 interface ClientMessage {
-	type?: string;
-	moveId?: string;
-	lineage?: string;
-	creature?: unknown;
-	protocol?: string;
-	protocolVersion?: number;
-	clientType?: string;
-	clientVersion?: string;
-	capabilities?: unknown;
+	type?: string; moveId?: string; lineage?: string; creature?: unknown;
+	protocol?: string; protocolVersion?: number; clientType?: string; clientVersion?: string; capabilities?: unknown;
+	round?: number; action?: { kind?: string; slot?: number };
 }
+interface LineageDefinition { id: Lineage; name: string; moves: MoveId[]; }
 
-interface LineageDefinition {
-	id: Lineage;
-	name: string;
-	moves: MoveId[];
-}
-
-/*
- * v0.2.2 introduces Demonym's real move vocabulary and effect model.
- *
- * IMPORTANT: numeric values below are WEB TEST BALANCE, not a claim that they
- * are the final Cardputer BattleEngine values. The public Demonym material does
- * not contain the complete private balance table. Keep move behavior/data in
- * this one library so exact firmware values can replace these numbers later.
- */
-const MOVE_LIBRARY: Record<MoveId, MoveDefinition> = {
-	'pulse-strike': {
-		id: 'pulse-strike',
-		name: 'Pulse Strike',
-		pressure: 'Neutral',
-		role: 'attack',
-		energyCost: 1,
-		accuracy: 96,
-		power: 14,
-		description: 'Reliable low-cost damaging hit.',
-	},
-	'quiet-ward': {
-		id: 'quiet-ward',
-		name: 'Quiet Ward',
-		pressure: 'Neutral',
-		role: 'guard',
-		energyCost: 2,
-		accuracy: 100,
-		power: 0,
-		description: 'Raises a ward to soften the next incoming hit.',
-	},
-	'restore-pulse': {
-		id: 'restore-pulse',
-		name: 'Restore Pulse',
-		pressure: 'Neutral',
-		role: 'heal',
-		energyCost: 3,
-		accuracy: 100,
-		power: 22,
-		description: 'Restores Health.',
-	},
-	'signal-snare': {
-		id: 'signal-snare',
-		name: 'Signal Snare',
-		pressure: 'Signal',
-		role: 'utility',
-		energyCost: 2,
-		accuracy: 90,
-		power: 7,
-		description: 'Applies Disruption, increasing enemy Energy costs.',
-	},
-	'overcharge': {
-		id: 'overcharge',
-		name: 'Overcharge',
-		pressure: 'Signal',
-		role: 'attack',
-		energyCost: 5,
-		accuracy: 88,
-		power: 28,
-		description: 'High-output Signal attack with a heavy Energy cost.',
-	},
-	'rend': {
-		id: 'rend',
-		name: 'Rend',
-		pressure: 'Force',
-		role: 'attack',
-		energyCost: 3,
-		accuracy: 86,
-		power: 24,
-		description: 'Strong Force hit with lower accuracy.',
-	},
-	'reckless-rush': {
-		id: 'reckless-rush',
-		name: 'Reckless Rush',
-		pressure: 'Force',
-		role: 'attack',
-		energyCost: 4,
-		accuracy: 82,
-		power: 32,
-		description: 'Very heavy hit that also hurts the user.',
-	},
-	'shell-brace': {
-		id: 'shell-brace',
-		name: 'Shell Brace',
-		pressure: 'Force',
-		role: 'guard',
-		energyCost: 3,
-		accuracy: 100,
-		power: 10,
-		description: 'Husk signature. Clears Stagger, restores Health, and braces for impact.',
-		signatureOf: 'Husk',
-	},
-	'bog-leech': {
-		id: 'bog-leech',
-		name: 'Bog Leech',
-		pressure: 'Corrosion',
-		role: 'attack',
-		energyCost: 3,
-		accuracy: 92,
-		power: 16,
-		description: 'Mire signature. Drains Health and improves against Corroded targets.',
-		signatureOf: 'Mire',
-	},
-	'phase-feint': {
-		id: 'phase-feint',
-		name: 'Phase Feint',
-		pressure: 'Signal',
-		role: 'utility',
-		energyCost: 2,
-		accuracy: 100,
-		power: 0,
-		description: 'Wisp signature. Boosts evasion against the next incoming move.',
-		signatureOf: 'Wisp',
-	},
-	'pursuit-bite': {
-		id: 'pursuit-bite',
-		name: 'Pursuit Bite',
-		pressure: 'Force',
-		role: 'attack',
-		energyCost: 3,
-		accuracy: 94,
-		power: 18,
-		description: 'Fang signature. A finisher that hits harder against weakened targets.',
-		signatureOf: 'Fang',
-	},
-	'chorus-echo': {
-		id: 'chorus-echo',
-		name: 'Chorus Echo',
-		pressure: 'Echo',
-		role: 'attack',
-		energyCost: 3,
-		accuracy: 92,
-		power: 16,
-		description: 'Choir signature. Feeds on existing Echo Interference or Burn.',
-		signatureOf: 'Choir',
-	},
-	'panel-shift': {
-		id: 'panel-shift',
-		name: 'Panel Shift',
-		pressure: 'Signal',
-		role: 'utility',
-		energyCost: 1,
-		accuracy: 100,
-		power: 3,
-		description: 'Machine signature. Clears signal noise and restores Energy.',
-		signatureOf: 'Machine',
-	},
-	'ember-spire': {
-		id: 'ember-spire',
-		name: 'Ember Spire',
-		pressure: 'Heat',
-		role: 'attack',
-		energyCost: 4,
-		accuracy: 90,
-		power: 20,
-		description: 'Cinder signature. Spikes an existing Burn without recoil.',
-		signatureOf: 'Cinder',
-	},
-	'veil-snare': {
-		id: 'veil-snare',
-		name: 'Veil Snare',
-		pressure: 'Echo',
-		role: 'utility',
-		energyCost: 3,
-		accuracy: 92,
-		power: 9,
-		description: 'Veil signature. Applies or deepens Echo Interference.',
-		signatureOf: 'Veil',
-	},
+const MOVE_LIBRARY = MOVE_LIBRARY_V19;
+const LINEAGE_WIRE: Record<Lineage, CanonicalLineage> = { Husk:'husk', Mire:'mire', Wisp:'wisp', Fang:'fang', Choir:'choir', Machine:'machine', Cinder:'cinder', Veil:'veil' };
+const LINEAGE_STARTERS: Record<Lineage, [MoveId,MoveId,MoveId,MoveId]> = {
+	Husk:['husk-knock','husk-tuck','husk-fault','shell-brace'], Mire:['mire-lash','mire-hide','mire-seep','bog-leech'],
+	Wisp:['wisp-jab','wisp-ward','wisp-ghost-cut','phase-feint'], Fang:['fang-snap','fang-crouch','fang-bait','pursuit-bite'],
+	Choir:['choir-tone','choir-veil','choir-discord','chorus-echo'], Machine:['machine-servo','machine-guard','machine-override','panel-shift'],
+	Cinder:['cinder-jab','cinder-screen','cinder-flash','ember-spire'], Veil:['veil-cut','veil-ward','veil-misdirect','veil-snare'],
 };
-
-/*
- * v0.2.3+ lineage presets. These are WEB TEST LOADOUTS built around the known
- * Demonym move vocabulary and each lineage's signature move. They make every
- * lineage/signature selectable for multiplayer testing without pretending the
- * private Cardputer learned-move table has already been synced.
- */
-const LINEAGE_LIBRARY: Record<Lineage, LineageDefinition> = {
-	Husk: { id: 'Husk', name: 'Husk', moves: ['pulse-strike', 'quiet-ward', 'rend', 'shell-brace'] },
-	Mire: { id: 'Mire', name: 'Mire', moves: ['pulse-strike', 'restore-pulse', 'signal-snare', 'bog-leech'] },
-	Wisp: { id: 'Wisp', name: 'Wisp', moves: ['pulse-strike', 'signal-snare', 'restore-pulse', 'phase-feint'] },
-	Fang: { id: 'Fang', name: 'Fang', moves: ['pulse-strike', 'rend', 'reckless-rush', 'pursuit-bite'] },
-	Choir: { id: 'Choir', name: 'Choir', moves: ['pulse-strike', 'signal-snare', 'restore-pulse', 'chorus-echo'] },
-	Machine: { id: 'Machine', name: 'Machine', moves: ['pulse-strike', 'quiet-ward', 'overcharge', 'panel-shift'] },
-	Cinder: { id: 'Cinder', name: 'Cinder', moves: ['pulse-strike', 'overcharge', 'reckless-rush', 'ember-spire'] },
-	Veil: { id: 'Veil', name: 'Veil', moves: ['pulse-strike', 'signal-snare', 'quiet-ward', 'veil-snare'] },
-};
-
-const STARTING_HP = 100;
-const STARTING_ENERGY = 7;
-const MAX_ENERGY = 10;
-const ENERGY_RECOVERY_PER_ROUND = 1;
+const LINEAGE_LIBRARY: Record<Lineage, LineageDefinition> = Object.fromEntries(
+	(Object.keys(LINEAGE_WIRE) as Lineage[]).map((lineage) => [lineage, { id: lineage, name: lineage, moves: LINEAGE_STARTERS[lineage] }]),
+) as unknown as Record<Lineage, LineageDefinition>;
 const RECOVER_ENERGY = 2;
 const MAX_LOG_ENTRIES = 24;
-const MAX_BATTLE_EVENTS = 40;
-const DISRUPTION_EXTRA_COST = 2;
-const WARD_DAMAGE_REDUCTION = 0.5;
-const EVASION_BONUS = 20;
-const BURN_DAMAGE = 4;
-const CORROSION_DAMAGE_MULTIPLIER = 1.2;
-const MAX_IMPORTED_NAME_LENGTH = 48;
-const MAX_IMPORTED_ID_LENGTH = 64;
-const MAX_IMPORTED_HP = 1000;
-const MAX_IMPORTED_ENERGY = 100;
+const MAX_BATTLE_EVENTS = 64;
 const RECONNECT_GRACE_MS = 60_000;
-
-const BATTLE_CONFIG = {
-	recoverEnergy: RECOVER_ENERGY,
-	energyRecoveryPerRound: ENERGY_RECOVERY_PER_ROUND,
-};
-
-const REQUIRED_CLIENT_CAPABILITIES: ClientCapability[] = [
-	'creature-payload-v1',
-	'round-lock-v1',
-	'battle-events-v1',
-	'recover-action-v1',
-	'session-resume-v1',
-];
-
+const BATTLE_CONFIG = { recoverEnergy: RECOVER_ENERGY, energyRecoveryPerRound: 0, battleRules: 19 };
+const REQUIRED_CLIENT_CAPABILITIES: ClientCapability[] = ['creature-payload-v2','round-lock-v1','battle-events-v1','recover-action-v1','session-resume-v1'];
 const CONNECTION_PROTOCOL = {
-	name: 'demonym-connect',
-	version: 1,
-	serverVersion: '0.3.0',
-	requiredCapabilities: REQUIRED_CLIENT_CAPABILITIES,
-	supportedClientTypes: ['web', 'cardputer'] as ClientType[],
+	name: 'demonym-connect-v1', version: 1, serverVersion: '0.3.2', requiredCapabilities: REQUIRED_CLIENT_CAPABILITIES,
+	supportedClientTypes: ['web','cardputer'] as ClientType[], aliases: ['demonym-connect'],
 };
-
 const BATTLE_PROTOCOL = {
-	version: 1,
-	creaturePayloadFormat: 'demonym-battle-creature',
-	creaturePayloadVersion: 1,
-	battleEventVersion: 1,
-	externalCreatureImport: true,
-	sessionResume: true,
-	reconnectGraceMs: RECONNECT_GRACE_MS,
+	version: 2, creaturePayloadFormat: 'demonym-battle-creature', creaturePayloadVersion: 2, battleRules: 19,
+	battleEventVersion: 1, externalCreatureImport: true, sessionResume: true, reconnectGraceMs: RECONNECT_GRACE_MS,
 	connectionProtocol: CONNECTION_PROTOCOL,
 };
-
-function createWebTestPayload(lineage: Lineage): BattleCreaturePayload {
-	const preset = LINEAGE_LIBRARY[lineage];
-	return {
-		format: 'demonym-battle-creature',
-		version: 1,
-		source: 'web-test',
-		creatureId: `web-test-${lineage.toLowerCase()}`,
-		name: `${preset.name} Demonym`,
-		lineage,
-		stats: { maxHp: STARTING_HP, maxEnergy: MAX_ENERGY },
-		moveIds: [...preset.moves],
-	};
+function numericSeed(): number { const x=new Uint32Array(1); crypto.getRandomValues(x); return x[0] || 1; }
+function createWebTestPayload(player: PlayerNumber, lineage: Lineage): CanonicalCreaturePayloadV2 {
+	const i=(Object.keys(LINEAGE_WIRE) as Lineage[]).indexOf(lineage)+1;
+	return { format:'demonym-battle-creature', version:2, source:'web-test', schemaVersion:1, battleRules:19,
+		creatureId: 0x57000000 + player*0x100 + i, visualSeed: 0x0d3a0000 + player*0x100 + i, publicId: 0x1000 + player*0x10 + i,
+		name:`${lineage} Test`, lineage:LINEAGE_WIRE[lineage], form:'static', level:10, currentHealth:100, currentEnergy:100, injury:0,
+		combat:{attackBonus:0,defenseBonus:0,healthBonus:0,energyBonus:0,pressureResistanceMask:0,pressureWeaknessMask:0,pressureBoostMask:0,installedPrimary:0,installedSecondary:0},
+		moveSlots:[...LINEAGE_STARTERS[lineage]] };
 }
-
-interface PayloadValidationResult {
-	ok: boolean;
-	payload?: BattleCreaturePayload;
-	error?: string;
+function syncCreature(c: CreatureState): CreatureState { c.hp=c.fighter.hp; c.energy=c.fighter.energy; c.statuses=statusList(c.fighter); c.lastMoveId=c.fighter.lastMove==='none'?null:c.fighter.lastMove; return c; }
+function createCreatureFromPayload(payload: CanonicalCreaturePayloadV2): CreatureState {
+	const v=validateCanonicalPayloadV2(payload); if('error' in v) throw new Error(v.error);
+	const normalized=structuredClone(v.payload); return syncCreature({payload:normalized,fighter:fighterFromPayload(normalized),hp:0,energy:0,statuses:[],lastMoveId:null});
 }
-
-function validateAndNormalizeBattleCreaturePayload(payload: unknown): PayloadValidationResult {
-	if (!payload || typeof payload !== 'object') return { ok: false, error: 'Creature payload must be an object.' };
-
-	const candidate = payload as Partial<BattleCreaturePayload>;
-	if (candidate.format !== 'demonym-battle-creature') return { ok: false, error: 'Unknown creature payload format.' };
-	if (candidate.version !== 1) return { ok: false, error: 'Unsupported creature payload version.' };
-	if (candidate.source !== 'web-test' && candidate.source !== 'cardputer') return { ok: false, error: 'Unknown creature payload source.' };
-	if (!candidate.lineage || !(candidate.lineage in LINEAGE_LIBRARY)) return { ok: false, error: 'Unknown Demonym lineage.' };
-
-	const creatureId = typeof candidate.creatureId === 'string' ? candidate.creatureId.trim() : '';
-	const name = typeof candidate.name === 'string' ? candidate.name.trim() : '';
-	if (!creatureId || creatureId.length > MAX_IMPORTED_ID_LENGTH) return { ok: false, error: `creatureId must be 1-${MAX_IMPORTED_ID_LENGTH} characters.` };
-	if (!name || name.length > MAX_IMPORTED_NAME_LENGTH) return { ok: false, error: `name must be 1-${MAX_IMPORTED_NAME_LENGTH} characters.` };
-
-	if (!candidate.stats || !Number.isInteger(candidate.stats.maxHp) || candidate.stats.maxHp <= 0 || candidate.stats.maxHp > MAX_IMPORTED_HP) {
-		return { ok: false, error: `maxHp must be an integer between 1 and ${MAX_IMPORTED_HP}.` };
-	}
-	if (!Number.isInteger(candidate.stats.maxEnergy) || candidate.stats.maxEnergy <= 0 || candidate.stats.maxEnergy > MAX_IMPORTED_ENERGY) {
-		return { ok: false, error: `maxEnergy must be an integer between 1 and ${MAX_IMPORTED_ENERGY}.` };
-	}
-
-	if (!Array.isArray(candidate.moveIds) || candidate.moveIds.length !== 4) return { ok: false, error: 'Creature payload must contain exactly four move IDs.' };
-	if (new Set(candidate.moveIds).size !== 4) return { ok: false, error: 'Creature move IDs must be unique.' };
-	if (!candidate.moveIds.every((moveId) => typeof moveId === 'string' && moveId in MOVE_LIBRARY)) return { ok: false, error: 'Creature payload contains an unknown move ID.' };
-
-	return {
-		ok: true,
-		payload: {
-			format: 'demonym-battle-creature',
-			version: 1,
-			source: candidate.source,
-			creatureId,
-			name,
-			lineage: candidate.lineage as Lineage,
-			stats: { maxHp: candidate.stats.maxHp, maxEnergy: candidate.stats.maxEnergy },
-			moveIds: [...candidate.moveIds] as MoveId[],
-		},
-	};
-}
-
-function validateBattleCreaturePayload(payload: unknown): payload is BattleCreaturePayload {
-	return validateAndNormalizeBattleCreaturePayload(payload).ok;
-}
-
-function createCreatureFromPayload(payload: BattleCreaturePayload): CreatureState {
-	const validation = validateAndNormalizeBattleCreaturePayload(payload);
-	if (!validation.ok || !validation.payload) {
-		throw new Error(validation.error ?? 'Invalid Demonym battle creature payload.');
-	}
-
-	const normalized = validation.payload;
-	return {
-		payload: structuredClone(normalized),
-		hp: normalized.stats.maxHp,
-		energy: Math.min(STARTING_ENERGY, normalized.stats.maxEnergy),
-		statuses: [],
-		lastMoveId: null,
-	};
-}
-
-function createCreature(player: PlayerNumber, lineage?: Lineage): CreatureState {
-	const selectedLineage: Lineage = lineage ?? (player === 1 ? 'Husk' : 'Wisp');
-	return createCreatureFromPayload(createWebTestPayload(selectedLineage));
-}
-
-function pickStartingPlayer(): PlayerNumber {
-	const byte = new Uint8Array(1);
-	crypto.getRandomValues(byte);
-	return byte[0] % 2 === 0 ? 1 : 2;
-}
-
-function generateSessionToken(): string {
-	const bytes = new Uint8Array(18);
-	crypto.getRandomValues(bytes);
-	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function randomPercent(): number {
-	const bytes = new Uint32Array(1);
-	crypto.getRandomValues(bytes);
-	return bytes[0] / 0xffffffff * 100;
-}
-
-function createInitialState(): BattleState {
-	return {
-		version: 13,
-		players: [createCreature(1), createCreature(2)],
-		ready: [false, false],
-		started: false,
-		phase: 'waiting',
-		round: 0,
-		roundFirstPlayer: null,
-		initiativeWinner: null,
-		winner: null,
-		lockedMoves: [null, null],
-		lockedCosts: [null, null],
-		rematch: [false, false],
-		matchNumber: 1,
-		log: ['Battle room created.'],
-		eventSeq: 0,
-		events: [],
-		sessionTokens: [null, null],
-		disconnectDeadlines: [null, null],
-		connectionIds: [null, null],
-	};
-}
-
-function getStatus(creature: CreatureState, id: StatusId): StatusState | undefined {
-	return creature.statuses.find((status) => status.id === id);
-}
-
-function hasStatus(creature: CreatureState, id: StatusId): boolean {
-	return Boolean(getStatus(creature, id));
-}
-
-function removeStatus(creature: CreatureState, id: StatusId): boolean {
-	const before = creature.statuses.length;
-	creature.statuses = creature.statuses.filter((status) => status.id !== id);
-	return creature.statuses.length !== before;
-}
-
-function addOrRefreshStatus(creature: CreatureState, id: StatusId, turns: number, stack = false) {
-	const existing = getStatus(creature, id);
-
-	if (!existing) {
-		creature.statuses.push({ id, turns, stacks: 1 });
-		return;
-	}
-
-	existing.turns = Math.max(existing.turns, turns);
-	if (stack) {
-		existing.stacks = Math.min(3, (existing.stacks ?? 1) + 1);
-	}
-}
-
-function healCreature(creature: CreatureState, amount: number): number {
-	let adjusted = amount;
-
-	if (hasStatus(creature, 'corrosion')) {
-		adjusted = Math.ceil(adjusted / 2);
-	}
-
-	const before = creature.hp;
-	creature.hp = Math.min(creature.payload.stats.maxHp, creature.hp + adjusted);
-	return creature.hp - before;
-}
-
-function damageCreature(creature: CreatureState, amount: number): number {
-	let adjusted = amount;
-
-	if (hasStatus(creature, 'ward')) {
-		adjusted = Math.max(1, Math.round(adjusted * WARD_DAMAGE_REDUCTION));
-		removeStatus(creature, 'ward');
-	}
-
-	if (hasStatus(creature, 'corrosion')) {
-		adjusted = Math.max(1, Math.round(adjusted * CORROSION_DAMAGE_MULTIPLIER));
-	}
-
-	const before = creature.hp;
-	creature.hp = Math.max(0, creature.hp - adjusted);
-	return before - creature.hp;
-}
-
-function effectiveEnergyCost(creature: CreatureState, move: MoveDefinition): number {
-	return move.energyCost + (hasStatus(creature, 'disruption') ? DISRUPTION_EXTRA_COST : 0);
-}
-
-function effectiveAccuracy(attacker: CreatureState, defender: CreatureState, move: MoveDefinition): number {
-	let accuracy = move.accuracy;
-
-	if (hasStatus(attacker, 'echo-interference')) {
-		const stacks = getStatus(attacker, 'echo-interference')?.stacks ?? 1;
-		accuracy -= 8 * stacks;
-	}
-
-	if (hasStatus(defender, 'evasion')) {
-		accuracy -= EVASION_BONUS;
-	}
-
-	return Math.max(20, Math.min(100, accuracy));
-}
-
-function otherPlayer(player: PlayerNumber): PlayerNumber {
-	return player === 1 ? 2 : 1;
-}
-
-
-function isOffensiveMove(move: MoveDefinition): boolean {
-	return move.role === 'attack' || (move.role === 'utility' && move.power > 0);
-}
+function createCreature(player: PlayerNumber, lineage?: Lineage): CreatureState { return createCreatureFromPayload(createWebTestPayload(player,lineage ?? (player===1?'Husk':'Wisp'))); }
+function pickStartingPlayer(): PlayerNumber { const b=new Uint8Array(1);crypto.getRandomValues(b);return b[0]%2===0?1:2; }
+function generateSessionToken(): string { const bytes=new Uint8Array(18);crypto.getRandomValues(bytes);return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join(''); }
+function createInitialState(): BattleState { return {version:14,players:[createCreature(1),createCreature(2)],ready:[false,false],started:false,phase:'waiting',round:0,roundFirstPlayer:null,initiativeWinner:null,canonicalFirstPlayer:null,winner:null,lockedMoves:[null,null],lockedCosts:[null,null],battleRuntime:null,rematch:[false,false],matchNumber:1,log:['Battle room created.'],eventSeq:0,events:[],sessionTokens:[null,null],disconnectDeadlines:[null,null],connectionIds:[null,null]}; }
+function otherPlayer(player: PlayerNumber): PlayerNumber { return player===1?2:1; }
 
 export class BattleRoom extends DurableObject<Env> {
 	private async getState(): Promise<BattleState> {
 		const storedState = await this.ctx.storage.get<BattleState | { version?: number }>('state');
 
-		if (!storedState || storedState.version !== 13) {
+		if (!storedState || storedState.version !== 14) {
 			const state = createInitialState();
 			await this.ctx.storage.put('state', state);
 			return state;
@@ -646,14 +188,15 @@ export class BattleRoom extends DurableObject<Env> {
 
 	private addEvent(state: BattleState, event: Omit<BattleEvent, 'id' | 'round'> & { round?: number }) {
 		state.eventSeq += 1;
-		state.events.push({
-			id: state.eventSeq,
-			round: event.round ?? state.round,
-			...event,
-		});
-
-		if (state.events.length > MAX_BATTLE_EVENTS) {
-			state.events.splice(0, state.events.length - MAX_BATTLE_EVENTS);
+		const authored: BattleEvent = { id: state.eventSeq, round: event.round ?? state.round, ...event };
+		state.events.push(authored);
+		if (state.events.length > MAX_BATTLE_EVENTS) state.events.splice(0, state.events.length - MAX_BATTLE_EVENTS);
+		// v0.3.2 keeps the rolling event list for browser/reconnect playback, but
+		// also emits each event as a top-level WebSocket message so a Cardputer
+		// does not need to parse the large browser state envelope.
+		for (const socket of this.ctx.getWebSockets()) {
+			const attachment = socket.deserializeAttachment() as SocketAttachment | null;
+			if (attachment?.handshakeComplete) this.send(socket, authored);
 		}
 	}
 
@@ -668,16 +211,20 @@ export class BattleRoom extends DurableObject<Env> {
 	}
 
 	private stateForPlayer(state: BattleState, player: PlayerNumber) {
-		const {
-			lockedMoves,
-			lockedCosts: _lockedCosts,
-			sessionTokens: _sessionTokens,
-			disconnectDeadlines: _disconnectDeadlines,
-			connectionIds: _connectionIds,
-			...publicState
-		} = state;
+		const { lockedMoves, lockedCosts: _lockedCosts, battleRuntime: _battleRuntime, sessionTokens: _sessionTokens, disconnectDeadlines: _disconnectDeadlines, connectionIds: _connectionIds, ...publicState } = state;
 		return {
 			...publicState,
+			players: state.players.map((creature) => ({
+				payload: creature.payload,
+				hp: creature.hp,
+				maxHp: creature.fighter.maxHp,
+				energy: creature.energy,
+				maxEnergy: creature.fighter.maxEnergy,
+				statuses: creature.statuses,
+				lastMoveId: creature.lastMoveId,
+				moveCooldowns: creature.fighter.moveCooldowns,
+				effectiveMoveCosts: creature.fighter.equippedMoves.map((move) => move === 'none' ? 0 : effectiveEnergyCost(creature.fighter, move)),
+			})),
 			lockedPlayers: [lockedMoves[0] !== null, lockedMoves[1] !== null],
 			yourLockedMoveId: lockedMoves[player - 1],
 		};
@@ -729,7 +276,9 @@ export class BattleRoom extends DurableObject<Env> {
 		state.round = 0;
 		state.roundFirstPlayer = null;
 		state.initiativeWinner = null;
+		state.canonicalFirstPlayer = null;
 		state.winner = null;
+		state.battleRuntime = null;
 		state.lockedMoves = [null, null];
 		state.lockedCosts = [null, null];
 		state.rematch = [false, false];
@@ -756,7 +305,9 @@ export class BattleRoom extends DurableObject<Env> {
 		state.round = 0;
 		state.roundFirstPlayer = null;
 		state.initiativeWinner = null;
+		state.canonicalFirstPlayer = null;
 		state.winner = null;
+		state.battleRuntime = null;
 		state.lockedMoves = [null, null];
 		state.lockedCosts = [null, null];
 		state.rematch = [false, false];
@@ -767,7 +318,7 @@ export class BattleRoom extends DurableObject<Env> {
 
 
 	private parseClientHello(data: ClientMessage): { ok: true; info: ClientInfo } | { ok: false; error: string } {
-		if (data.protocol !== CONNECTION_PROTOCOL.name) {
+		if (data.protocol !== CONNECTION_PROTOCOL.name && data.protocol !== 'demonym-connect') {
 			return { ok: false, error: `Unsupported connection protocol. Expected ${CONNECTION_PROTOCOL.name}.` };
 		}
 
@@ -879,393 +430,151 @@ export class BattleRoom extends DurableObject<Env> {
 
 	private async handleReady(socket: WebSocket, player: PlayerNumber) {
 		const state = await this.getState();
-
-		if (state.winner !== null) {
-			this.send(socket, { type: 'error', message: 'This battle is already over.' });
-			return;
-		}
-
-		if (state.ready[player - 1]) return;
-
-		state.ready[player - 1] = true;
-		this.addLog(state, `Player ${player} is ready.`);
-		this.addEvent(state, { type: 'ready', player, message: `Player ${player} is ready.` });
-
+		if (state.winner !== null) { this.send(socket,{type:'error',message:'This battle is already over.'}); return; }
+		if (state.ready[player-1]) return;
+		state.ready[player-1]=true;
+		this.addLog(state,`Player ${player} is ready.`);
+		this.addEvent(state,{type:'ready',player,message:`Player ${player} is ready.`});
 		if (state.ready[0] && state.ready[1] && this.bothPlayersConnected()) {
-			const startingPlayer = pickStartingPlayer();
-			state.started = true;
-			state.phase = 'selecting';
-			state.round = 1;
-			state.roundFirstPlayer = startingPlayer;
-			state.initiativeWinner = startingPlayer;
-			state.lockedMoves = [null, null];
-			state.lockedCosts = [null, null];
-			state.rematch = [false, false];
-			this.addLog(state, 'Both players ready. Signal Toss...');
-			this.addLog(state, `Player ${startingPlayer} wins the Signal Toss and has first resolution priority.`);
-			this.addEvent(state, { type: 'signal_toss', player: startingPlayer, message: `Player ${startingPlayer} wins the Signal Toss.` });
-			this.addLog(state, 'Round 1: both players lock in a move.');
-			this.addEvent(state, { type: 'round_start', player: startingPlayer, message: `Round 1. Player ${startingPlayer} resolves first.` });
+			const startingPlayer=pickStartingPlayer();
+			state.started=true; state.phase='selecting'; state.round=1; state.roundFirstPlayer=startingPlayer; state.initiativeWinner=startingPlayer; state.canonicalFirstPlayer=startingPlayer;
+			state.battleRuntime=createRuntime(numericSeed()); state.lockedMoves=[null,null]; state.lockedCosts=[null,null]; state.rematch=[false,false];
+			this.addLog(state,'Both players ready. Signal Toss...'); this.addLog(state,`Player ${startingPlayer} wins the Signal Toss and is canonical first fighter.`);
+			this.addEvent(state,{type:'signal_toss',player:startingPlayer,message:`Player ${startingPlayer} wins the Signal Toss.`});
+			this.addEvent(state,{type:'round_start',player:startingPlayer,message:`Round 1. Player ${startingPlayer} resolves first.`});
 		}
-
 		await this.saveAndBroadcast(state);
 	}
 
 	private async handleLineageSelect(socket: WebSocket, player: PlayerNumber, rawLineage?: string) {
-		const state = await this.getState();
+		const state=await this.getState();
+		if(state.winner!==null){this.send(socket,{type:'error',message:'This battle is already over.'});return;}
+		if(state.started||state.ready[player-1]){this.send(socket,{type:'error',message:'Lineage is locked once you are ready.'});return;}
+		if(!rawLineage||!(rawLineage in LINEAGE_LIBRARY)){this.send(socket,{type:'error',message:'Unknown lineage.'});return;}
+		const lineage=rawLineage as Lineage;
+		if(state.players[player-1].payload.lineage===LINEAGE_WIRE[lineage]&&state.players[player-1].payload.source==='web-test')return;
+		state.players[player-1]=createCreature(player,lineage);
+		this.addLog(state,`Player ${player} selected ${lineage}.`);this.addEvent(state,{type:'lineage_selected',player,message:`Player ${player} selected ${lineage}.`});await this.saveAndBroadcast(state);
+	}
 
-		if (state.winner !== null) {
-			this.send(socket, { type: 'error', message: 'This battle is already over.' });
-			return;
-		}
-
-		if (state.started || state.ready[player - 1]) {
-			this.send(socket, { type: 'error', message: 'Lineage is locked once you are ready.' });
-			return;
-		}
-
-		if (!rawLineage || !(rawLineage in LINEAGE_LIBRARY)) {
-			this.send(socket, { type: 'error', message: 'Unknown lineage.' });
-			return;
-		}
-
-		const lineage = rawLineage as Lineage;
-		if (state.players[player - 1].payload.lineage === lineage && state.players[player - 1].payload.source === 'web-test') return;
-
-		state.players[player - 1] = createCreature(player, lineage);
-		this.addLog(state, `Player ${player} selected ${lineage}.`);
-		this.addEvent(state, { type: 'lineage_selected', player, message: `Player ${player} selected ${lineage}.` });
+	private async handleCreatureImport(socket: WebSocket, player: PlayerNumber, rawPayload: unknown, autoReady = false) {
+		const attachment=socket.deserializeAttachment() as SocketAttachment|null;
+		if(attachment?.clientInfo?.clientType!=='cardputer'){this.send(socket,{type:'error',message:'Cardputer creature imports require a Cardputer client handshake.'});return;}
+		const state=await this.getState();
+		if(state.winner!==null){this.send(socket,{type:'error',message:'This battle is already over.'});return;}
+		if(state.started||state.ready[player-1]){this.send(socket,{type:'error',message:'Creature payload is locked once you are ready.'});return;}
+		const validation=validateCanonicalPayloadV2(rawPayload);
+		if('error' in validation){this.send(socket,{type:'error',message:`Payload rejected: ${validation.error}`});return;}
+		if(validation.payload.source!=='cardputer'){this.send(socket,{type:'error',message:'External creature imports must use source: "cardputer".'});return;}
+		state.players[player-1]=createCreatureFromPayload(validation.payload);
+		this.addLog(state,`Player ${player} imported ${validation.payload.name} using canonical Battle Rules v19.`);
+		this.addEvent(state,{type:'creature_imported',player,message:`Player ${player} imported canonical creature payload v2.`});
 		await this.saveAndBroadcast(state);
+		if(autoReady) await this.handleReady(socket,player);
 	}
 
-	private async handleCreatureImport(socket: WebSocket, player: PlayerNumber, rawPayload: unknown) {
-		const attachment = socket.deserializeAttachment() as SocketAttachment | null;
-		if (attachment?.clientInfo?.clientType !== 'cardputer') {
-			this.send(socket, { type: 'error', message: 'Cardputer creature imports require a Cardputer client handshake.' });
-			return;
-		}
-
-		const state = await this.getState();
-
-		if (state.winner !== null) {
-			this.send(socket, { type: 'error', message: 'This battle is already over.' });
-			return;
-		}
-
-		if (state.started || state.ready[player - 1]) {
-			this.send(socket, { type: 'error', message: 'Creature payload is locked once you are ready.' });
-			return;
-		}
-
-		const validation = validateAndNormalizeBattleCreaturePayload(rawPayload);
-		if (!validation.ok || !validation.payload) {
-			this.send(socket, { type: 'error', message: `Payload rejected: ${validation.error ?? 'Invalid creature payload.'}` });
-			return;
-		}
-
-		if (validation.payload.source !== 'cardputer') {
-			this.send(socket, { type: 'error', message: 'External creature imports must use source: "cardputer".' });
-			return;
-		}
-
-		state.players[player - 1] = createCreatureFromPayload(validation.payload);
-		this.addLog(state, `Player ${player} imported ${validation.payload.name} from a Cardputer payload.`);
-		this.addEvent(state, { type: 'creature_imported', player, message: `Player ${player} imported an external creature payload.` });
-		await this.saveAndBroadcast(state);
-	}
-
-	private resolveMoveEffect(state: BattleState, player: PlayerNumber, move: MoveDefinition) {
-		const opponent: PlayerNumber = player === 1 ? 2 : 1;
-		const attacker = state.players[player - 1];
-		const defender = state.players[opponent - 1];
-		const attackerLabel = `Player ${player}`;
-		const defenderLabel = `Player ${opponent}`;
-
-		if (move.id === 'quiet-ward') {
-			addOrRefreshStatus(attacker, 'ward', 2);
-			this.addLog(state, `${attackerLabel} raised Quiet Ward.`);
-			this.addEvent(state, { type: 'move_resolved', player, targetPlayer: player, moveId: move.id, message: `${attackerLabel} raised Quiet Ward.` });
-			this.addEvent(state, { type: 'status_applied', player, targetPlayer: player, moveId: move.id, statusId: 'ward', message: `${attackerLabel} gained Ward.` });
-			return;
-		}
-
-		if (move.id === 'restore-pulse') {
-			const healed = healCreature(attacker, move.power);
-			this.addLog(state, `${attackerLabel} used Restore Pulse and restored ${healed} HP.`);
-			this.addEvent(state, { type: 'heal', player, targetPlayer: player, moveId: move.id, amount: healed, message: `${attackerLabel} restored ${healed} HP.` });
-			return;
-		}
-
-		if (move.id === 'shell-brace') {
-			const cleared = removeStatus(attacker, 'stagger');
-			const healed = healCreature(attacker, move.power);
-			addOrRefreshStatus(attacker, 'ward', 2);
-			this.addLog(state, `${attackerLabel} used Shell Brace: ${healed} HP restored${cleared ? ', Stagger cleared' : ''}, Ward raised.`);
-			this.addEvent(state, { type: 'heal', player, targetPlayer: player, moveId: move.id, amount: healed, message: `${attackerLabel} used Shell Brace.` });
-			this.addEvent(state, { type: 'status_applied', player, targetPlayer: player, moveId: move.id, statusId: 'ward', message: `${attackerLabel} gained Ward.` });
-			return;
-		}
-
-		if (move.id === 'phase-feint') {
-			addOrRefreshStatus(attacker, 'evasion', 2);
-			this.addLog(state, `${attackerLabel} used Phase Feint and became harder to hit.`);
-			this.addEvent(state, { type: 'move_resolved', player, targetPlayer: player, moveId: move.id, message: `${attackerLabel} used Phase Feint.` });
-			this.addEvent(state, { type: 'status_applied', player, targetPlayer: player, moveId: move.id, statusId: 'evasion', message: `${attackerLabel} gained Evasion.` });
-			return;
-		}
-
-		if (move.id === 'panel-shift') {
-			const clearedDisruption = removeStatus(attacker, 'disruption');
-			const clearedEcho = removeStatus(attacker, 'echo-interference');
-			const before = attacker.energy;
-			attacker.energy = Math.min(attacker.payload.stats.maxEnergy, attacker.energy + move.power);
-			const restored = attacker.energy - before;
-			this.addLog(state, `${attackerLabel} used Panel Shift: ${restored} Energy restored${clearedDisruption || clearedEcho ? ', noise cleared' : ''}.`);
-			this.addEvent(state, { type: 'recover', player, targetPlayer: player, moveId: move.id, amount: restored, message: `${attackerLabel} restored ${restored} Energy with Panel Shift.` });
-			return;
-		}
-
-		let damage = move.power;
-
-		if (move.id === 'pursuit-bite' && defender.hp <= Math.ceil(defender.payload.stats.maxHp * 0.35)) {
-			damage += 10;
-		}
-
-		if (move.id === 'bog-leech' && hasStatus(defender, 'corrosion')) {
-			damage += 6;
-		}
-
-		if (move.id === 'chorus-echo' && (hasStatus(defender, 'echo-interference') || hasStatus(defender, 'burn'))) {
-			damage += 8;
-		}
-
-		if (move.id === 'ember-spire' && hasStatus(defender, 'burn')) {
-			damage += 10;
-		}
-
-		const dealt = damageCreature(defender, damage);
-		this.addLog(state, `${attackerLabel} used ${move.name} for ${dealt} damage.`);
-		this.addEvent(state, { type: 'move_resolved', player, targetPlayer: opponent, moveId: move.id, amount: dealt, message: `${attackerLabel} used ${move.name} for ${dealt} damage.` });
-
-		if (move.id === 'signal-snare') {
-			addOrRefreshStatus(defender, 'disruption', 3);
-			this.addLog(state, `${defenderLabel} is Disrupted. Move costs are increased.`);
-			this.addEvent(state, { type: 'status_applied', player, targetPlayer: opponent, moveId: move.id, statusId: 'disruption', message: `${defenderLabel} is Disrupted.` });
-		}
-
-		if (move.id === 'bog-leech') {
-			const healed = healCreature(attacker, Math.max(1, Math.ceil(dealt / (hasStatus(defender, 'corrosion') ? 2 : 3))));
-			if (healed > 0) {
-				this.addLog(state, `${attackerLabel} drained ${healed} HP.`);
-				this.addEvent(state, { type: 'heal', player, targetPlayer: player, moveId: move.id, amount: healed, message: `${attackerLabel} drained ${healed} HP.` });
-			}
-		}
-
-		if (move.id === 'reckless-rush') {
-			const recoil = Math.max(1, Math.ceil(dealt * 0.25));
-			attacker.hp = Math.max(1, attacker.hp - recoil);
-			this.addLog(state, `${attackerLabel} took ${recoil} recoil damage.`);
-		}
-
-		if (move.id === 'veil-snare') {
-			addOrRefreshStatus(defender, 'echo-interference', 3, true);
-			const stacks = getStatus(defender, 'echo-interference')?.stacks ?? 1;
-			this.addLog(state, `${defenderLabel} has Echo Interference x${stacks}.`);
-			this.addEvent(state, { type: 'status_applied', player, targetPlayer: opponent, moveId: move.id, statusId: 'echo-interference', message: `${defenderLabel} has Echo Interference x${stacks}.` });
-		}
-	}
-
-	private applyEndOfRound(state: BattleState) {
-		for (let index = 0; index < state.players.length; index++) {
-			const creature = state.players[index];
-			const label = `Player ${index + 1}`;
-
-			if (hasStatus(creature, 'burn') && creature.hp > 0) {
-				const burnDamage = Math.min(BURN_DAMAGE, Math.max(0, creature.hp - 1));
-				creature.hp -= burnDamage;
-				if (burnDamage > 0) this.addLog(state, `${label} took ${burnDamage} Burn damage.`);
-			}
-
-			for (const status of creature.statuses) {
-				status.turns -= 1;
-			}
-
-			creature.statuses = creature.statuses.filter((status) => status.turns > 0);
-			creature.energy = Math.min(creature.payload.stats.maxEnergy, creature.energy + ENERGY_RECOVERY_PER_ROUND);
-		}
-	}
-
-	private resolveLockedAction(state: BattleState, player: PlayerNumber) {
-		const opponent = otherPlayer(player);
-		const attacker = state.players[player - 1];
-		const defender = state.players[opponent - 1];
-		const action = state.lockedMoves[player - 1];
-		const reservedCost = state.lockedCosts[player - 1] ?? 0;
-
-		if (!action || attacker.hp <= 0 || state.winner !== null) return;
-
-		if (action === 'recover') {
-			const before = attacker.energy;
-			attacker.energy = Math.min(attacker.payload.stats.maxEnergy, attacker.energy + RECOVER_ENERGY);
-			const restored = attacker.energy - before;
-			this.addLog(state, `Player ${player} used Recover and restored ${restored} Energy.`);
-			this.addEvent(state, { type: 'recover', player, targetPlayer: player, amount: restored, message: `Player ${player} restored ${restored} Energy.` });
-			return;
-		}
-
-		const move = MOVE_LIBRARY[action];
-		attacker.energy = Math.max(0, attacker.energy - reservedCost);
-
-		const accuracy = effectiveAccuracy(attacker, defender, move);
-		const hit = move.accuracy >= 100 || randomPercent() < accuracy;
-
-		if (!hit) {
-			this.addLog(state, `Player ${player} used ${move.name}, but it missed.`);
-			this.addEvent(state, { type: 'move_missed', player, targetPlayer: opponent, moveId: move.id, message: `Player ${player} used ${move.name}, but it missed.` });
-		} else {
-			this.resolveMoveEffect(state, player, move);
-		}
-
-		if (isOffensiveMove(move) && hasStatus(defender, 'evasion')) {
-			removeStatus(defender, 'evasion');
-		}
-
-		attacker.lastMoveId = action;
-
-		if (defender.hp <= 0) {
-			state.winner = player;
-			state.phase = 'finished';
-			this.addLog(state, `Player ${player} wins.`);
-			this.addEvent(state, { type: 'battle_end', player, message: `Player ${player} wins.` });
-		} else if (attacker.hp <= 0) {
-			state.winner = opponent;
-			state.phase = 'finished';
-			this.addLog(state, `Player ${opponent} wins.`);
-			this.addEvent(state, { type: 'battle_end', player: opponent, message: `Player ${opponent} wins.` });
-		}
+	private emitChoiceResult(state: BattleState, player: PlayerNumber, choice: LockedAction, report: TurnReport, canonicalFirst: boolean) {
+		const target=otherPlayer(player);
+		const move=canonicalFirst?report.firstMove:report.secondMove;
+		const missed=canonicalFirst?report.firstMissed:report.secondMissed;
+		const damage=canonicalFirst?report.firstDamage:report.secondDamage;
+		const recovered=canonicalFirst?report.firstRecovered:report.secondRecovered;
+		const status=canonicalFirst?report.statusAppliedToSecond:report.statusAppliedToFirst;
+		if(choice==='recover'){this.addLog(state,`Player ${player} used Recover and restored ${recovered} Energy.`);this.addEvent(state,{type:'recover',player,targetPlayer:player,amount:recovered,message:`Player ${player} restored ${recovered} Energy.`});return;}
+		if(choice==='guard'){this.addLog(state,`Player ${player} guarded and recovered Energy.`);this.addEvent(state,{type:'move_resolved',player,targetPlayer:player,message:`Player ${player} guarded.`});return;}
+		if(!choice||move==='none')return;
+		const name=MOVE_LIBRARY[move]?.name??move;
+		if(missed){this.addLog(state,`Player ${player} used ${name}, but it missed.`);this.addEvent(state,{type:'move_missed',player,targetPlayer:target,moveId:move,message:`Player ${player} used ${name}, but it missed.`});return;}
+		this.addLog(state,damage>0?`Player ${player} used ${name} for ${damage} damage.`:`Player ${player} used ${name}.`);
+		this.addEvent(state,{type:'move_resolved',player,targetPlayer:target,moveId:move,amount:damage,message:damage>0?`Player ${player} used ${name} for ${damage} damage.`:`Player ${player} used ${name}.`});
+		if(recovered>0)this.addEvent(state,{type:'heal',player,targetPlayer:player,moveId:move,amount:recovered,message:`Player ${player} recovered ${recovered}.`});
+		if(status)this.addEvent(state,{type:'status_applied',player,targetPlayer:target,moveId:move,statusId:status,message:`Player ${target} gained ${status}.`});
 	}
 
 	private resolveRound(state: BattleState) {
-		if (!state.lockedMoves[0] || !state.lockedMoves[1] || !state.roundFirstPlayer) return;
-
-		const first = state.roundFirstPlayer;
-		const second = otherPlayer(first);
-		this.addLog(state, `Round ${state.round}: both moves locked. Resolving Player ${first} first.`);
-
-		this.resolveLockedAction(state, first);
-		if (state.winner === null) this.resolveLockedAction(state, second);
-
-		if (state.winner !== null) {
-			state.lockedMoves = [null, null];
-			state.lockedCosts = [null, null];
-			return;
+		if(!state.lockedMoves[0]||!state.lockedMoves[1]||!state.canonicalFirstPlayer||!state.battleRuntime)return;
+		const canonicalFirst=state.canonicalFirstPlayer, canonicalSecond=otherPlayer(canonicalFirst);
+		const firstCreature=state.players[canonicalFirst-1], secondCreature=state.players[canonicalSecond-1];
+		const toChoice=(creature:CreatureState,locked:LockedAction):BattleChoice=>{
+			if(locked==='recover')return{kind:'recover'}; if(locked==='guard')return{kind:'guard'};
+			const slot=locked?creature.fighter.equippedMoves.indexOf(locked):-1; return{kind:'move',slot:slot>=0?slot:0};
+		};
+		const firstLocked=state.lockedMoves[canonicalFirst-1], secondLocked=state.lockedMoves[canonicalSecond-1];
+		const report=resolvePeerTurn(state.battleRuntime,firstCreature.fighter,secondCreature.fighter,toChoice(firstCreature,firstLocked),toChoice(secondCreature,secondLocked));
+		syncCreature(firstCreature);syncCreature(secondCreature);
+		// Emit playback in the actual v19 initiative order for this turn.
+		const firstActsFirst=(state.battleRuntime.turnCount&1)===1;
+		if(firstActsFirst){this.emitChoiceResult(state,canonicalFirst,firstLocked,report,true);if(report.secondMove!=='none'||secondLocked==='guard'||secondLocked==='recover')this.emitChoiceResult(state,canonicalSecond,secondLocked,report,false);}
+		else{this.emitChoiceResult(state,canonicalSecond,secondLocked,report,false);if(report.firstMove!=='none'||firstLocked==='guard'||firstLocked==='recover')this.emitChoiceResult(state,canonicalFirst,firstLocked,report,true);}
+		if(report.firstStatusDamage>0)this.addLog(state,`Player ${canonicalFirst} took ${report.firstStatusDamage} Burn damage.`);
+		if(report.secondStatusDamage>0)this.addLog(state,`Player ${canonicalSecond} took ${report.secondStatusDamage} Burn damage.`);
+		state.lockedMoves=[null,null];state.lockedCosts=[null,null];
+		if(report.outcome!=='ongoing'){
+			state.phase='finished';
+			if(report.outcome==='first')state.winner=canonicalFirst;else if(report.outcome==='second')state.winner=canonicalSecond;else state.winner=0;
+			const msg=state.winner===0?'Battle ended in a draw.':`Player ${state.winner} wins.`;this.addLog(state,msg);this.addEvent(state,{type:'battle_end',...(state.winner?{player:state.winner}:{ }),message:msg});return;
 		}
-
-		this.applyEndOfRound(state);
-		state.round += 1;
-		state.roundFirstPlayer = second;
-		state.lockedMoves = [null, null];
-		state.lockedCosts = [null, null];
-		this.addLog(state, `Round ${state.round}: both players lock in a move. Player ${state.roundFirstPlayer} resolves first.`);
-		this.addEvent(state, { type: 'round_start', player: state.roundFirstPlayer, message: `Round ${state.round}. Player ${state.roundFirstPlayer} resolves first.` });
+		state.round=state.battleRuntime.turnCount+1;
+		state.roundFirstPlayer=(state.round&1)===1?canonicalFirst:canonicalSecond;
+		this.addEvent(state,{type:'round_start',player:state.roundFirstPlayer,message:`Round ${state.round}. Player ${state.roundFirstPlayer} resolves first.`});
 	}
 
-	private async lockAction(socket: WebSocket, player: PlayerNumber, action: MoveId | 'recover', cost: number) {
-		const state = await this.getState();
-
-		if (!this.bothPlayersConnected()) {
-			this.send(socket, { type: 'error', message: 'Waiting for another player.' });
-			return;
-		}
-
-		if (state.winner !== null || state.phase === 'finished') {
-			this.send(socket, { type: 'error', message: 'This battle is already over.' });
-			return;
-		}
-
-		if (!state.started || !state.ready[0] || !state.ready[1] || state.phase !== 'selecting') {
-			this.send(socket, { type: 'error', message: 'Both players must be ready before battling.' });
-			return;
-		}
-
-		if (state.lockedMoves[player - 1] !== null) {
-			this.send(socket, { type: 'error', message: 'Your move is already locked for this round.' });
-			return;
-		}
-
-		state.lockedMoves[player - 1] = action;
-		state.lockedCosts[player - 1] = cost;
-		this.addLog(state, `Player ${player} locked in a move.`);
-		this.addEvent(state, { type: 'action_locked', player, message: `Player ${player} locked in a move.` });
-
-		if (state.lockedMoves[0] !== null && state.lockedMoves[1] !== null) {
-			this.resolveRound(state);
-		}
-
-		await this.saveAndBroadcast(state);
+	private async lockAction(socket: WebSocket, player: PlayerNumber, action: Exclude<LockedAction,null>) {
+		const state=await this.getState();
+		if(!this.bothPlayersConnected()){this.send(socket,{type:'error',message:'Waiting for another player.'});return;}
+		if(state.winner!==null||state.phase==='finished'){this.send(socket,{type:'error',message:'This battle is already over.'});return;}
+		if(!state.started||!state.ready[0]||!state.ready[1]||state.phase!=='selecting'){this.send(socket,{type:'error',message:'Both players must be ready before battling.'});return;}
+		if(state.lockedMoves[player-1]!==null){this.send(socket,{type:'error',message:'Your action is already locked for this round.'});return;}
+		state.lockedMoves[player-1]=action;state.lockedCosts[player-1]=0;this.addLog(state,`Player ${player} locked in an action.`);this.addEvent(state,{type:'action_locked',player,message:`Player ${player} locked in an action.`});
+		if(state.lockedMoves[0]!==null&&state.lockedMoves[1]!==null)this.resolveRound(state);await this.saveAndBroadcast(state);
 	}
 
 	private async handleMove(socket: WebSocket, player: PlayerNumber, rawMoveId?: string) {
-		const state = await this.getState();
-
-		if (!this.bothPlayersConnected()) {
-			this.send(socket, { type: 'error', message: 'Waiting for another player.' });
-			return;
-		}
-
-		if (state.winner !== null || state.phase === 'finished') {
-			this.send(socket, { type: 'error', message: 'This battle is already over.' });
-			return;
-		}
-
-		if (!state.started || !state.ready[0] || !state.ready[1] || state.phase !== 'selecting') {
-			this.send(socket, { type: 'error', message: 'Both players must be ready before battling.' });
-			return;
-		}
-
-		if (state.lockedMoves[player - 1] !== null) {
-			this.send(socket, { type: 'error', message: 'Your move is already locked for this round.' });
-			return;
-		}
-
-		if (!rawMoveId || !(rawMoveId in MOVE_LIBRARY)) {
-			this.send(socket, { type: 'error', message: 'Unknown move.' });
-			return;
-		}
-
-		const moveId = rawMoveId as MoveId;
-		const move = MOVE_LIBRARY[moveId];
-		const attacker = state.players[player - 1];
-
-		if (!attacker.payload.moveIds.includes(moveId)) {
-			this.send(socket, { type: 'error', message: 'That creature does not know this move.' });
-			return;
-		}
-
-		const cost = effectiveEnergyCost(attacker, move);
-		if (attacker.energy < cost) {
-			this.send(socket, { type: 'error', message: `Not enough energy. ${move.name} currently costs ${cost}.` });
-			return;
-		}
-
-		await this.lockAction(socket, player, moveId, cost);
+		const state=await this.getState(); const creature=state.players[player-1];
+		if(!rawMoveId||!(rawMoveId in MOVE_LIBRARY)||rawMoveId==='none'){this.send(socket,{type:'error',message:'Unknown move.'});return;}
+		const moveId=rawMoveId as MoveId;
+		if(!creature.fighter.equippedMoves.includes(moveId)){this.send(socket,{type:'error',message:'That creature does not have this move equipped.'});return;}
+		if(!canUseMove(creature.fighter,moveId)){const cost=effectiveEnergyCost(creature.fighter,moveId);this.send(socket,{type:'error',message:`Move unavailable. ${MOVE_LIBRARY[moveId].name} costs ${cost} Energy or is cooling down.`});return;}
+		await this.lockAction(socket,player,moveId);
 	}
 
-	private async handleRecover(socket: WebSocket, player: PlayerNumber) {
+	private async handleBattleAction(socket: WebSocket, player: PlayerNumber, data: ClientMessage) {
 		const state = await this.getState();
-
-		if (!state.started || state.phase !== 'selecting' || state.winner !== null) {
-			this.send(socket, { type: 'error', message: 'Recover is not available right now.' });
+		if (!Number.isInteger(data.round) || data.round !== state.round) {
+			this.send(socket, { type: 'error', message: `Round mismatch. Server is on Round ${state.round}.` });
 			return;
 		}
 
-		if (state.lockedMoves[player - 1] !== null) {
-			this.send(socket, { type: 'error', message: 'Your move is already locked for this round.' });
+		const kind = data.action?.kind;
+		if (kind === 'recover') {
+			await this.lockAction(socket, player, 'recover');
+			return;
+		}
+		if (kind === 'guard') {
+			await this.lockAction(socket, player, 'guard');
 			return;
 		}
 
-		await this.lockAction(socket, player, 'recover', 0);
+		const slot = data.action?.slot;
+		if (kind !== 'move' || !Number.isInteger(slot) || slot === undefined || slot < 0 || slot > 3) {
+			this.send(socket, { type: 'error', message: 'Invalid battle action.' });
+			return;
+		}
+
+		const creature = state.players[player - 1];
+		const move = creature.fighter.equippedMoves[slot];
+		if (!move || move === 'none') {
+			this.send(socket, { type: 'error', message: 'That move slot is empty.' });
+			return;
+		}
+		if (!canUseMove(creature.fighter, move)) {
+			this.send(socket, { type: 'error', message: `Move unavailable. ${MOVE_LIBRARY[move].name} costs ${effectiveEnergyCost(creature.fighter, move)} Energy or is cooling down.` });
+			return;
+		}
+		await this.lockAction(socket, player, move);
 	}
+
+	private async handleRecover(socket: WebSocket, player: PlayerNumber) { await this.lockAction(socket,player,'recover'); }
 
 	async fetch(request: Request): Promise<Response> {
 		if (request.headers.get('Upgrade') !== 'websocket') {
@@ -1368,10 +677,9 @@ export class BattleRoom extends DurableObject<Env> {
 			return;
 		}
 
-		if (data.type === 'import-creature') {
-			await this.handleCreatureImport(socket, attachment.player, data.creature);
-			return;
-		}
+		if (data.type === 'import-creature') { await this.handleCreatureImport(socket, attachment.player, data.creature, false); return; }
+
+		if (data.type === 'creature-snapshot') { await this.handleCreatureImport(socket, attachment.player, data.creature, true); return; }
 
 		if (data.type === 'ready') {
 			await this.handleReady(socket, attachment.player);
@@ -1392,6 +700,8 @@ export class BattleRoom extends DurableObject<Env> {
 			await this.handleLeave(socket, attachment);
 			return;
 		}
+
+		if (data.type === 'battle-action') { await this.handleBattleAction(socket, attachment.player, data); return; }
 
 		if (data.type === 'recover') await this.handleRecover(socket, attachment.player);
 	}
